@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="id" class="h-full bg-slate-900 text-slate-100">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Odoo Migration Studio | 100% Pure API JSON-2</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .font-mono { font-family: 'Fira Code', monospace; }
+    /* Custom scrollbar for terminal */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+  </style>
+</head>
+<body class="min-h-full flex flex-col bg-slate-950 text-slate-100">
+
+  <!-- NAVBAR / HEADER -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/20 text-white font-bold text-xl">
+          Ω
+        </div>
+        <div>
+          <h1 class="text-lg font-bold bg-gradient-to-r from-white via-slate-200 to-indigo-300 bg-clip-text text-transparent leading-none">
+            Odoo Migration Studio
+          </h1>
+          <p class="text-xs text-slate-400 mt-1">100% Pure API JSON-2 • Dual-Route ETL Engine</p>
+        </div>
+      </div>
+
+      <div class="flex items-center space-x-3 text-xs">
+        <div class="flex items-center px-3 py-1.5 rounded-full bg-slate-800/80 border border-slate-700/60 text-slate-300">
+          <span class="w-2 h-2 rounded-full mr-2 bg-slate-400" id="live-indicator"></span>
+          <span id="system-status-text">Ready</span>
+        </div>
+        <div class="hidden md:flex items-center px-3 py-1.5 rounded-full bg-indigo-950/60 border border-indigo-800/50 text-indigo-300 font-mono text-[11px]" title="Database SQLite pemetaan relasi ID">
+          📁 <span class="ml-1.5 truncate max-w-xs" id="header-db-name">{{ db_filename }}</span>
+        </div>
+        <button id="btn-logout" title="Keluar dari session studio" class="flex items-center px-3 py-1.5 rounded-full bg-slate-800/80 hover:bg-rose-950/70 border border-slate-700/60 hover:border-rose-800/60 text-slate-400 hover:text-rose-300 transition">
+          <svg class="w-3.5 h-3.5 mr-1 text-slate-400 group-hover:text-rose-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+          Logout
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN CONTENT CONTAINER -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+
+    <!-- SECTION 1: CONNECTION CONFIGURATION CARDS -->
+    <section>
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-base font-semibold text-white flex items-center">
+            <svg class="w-5 h-5 mr-2 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+            Konfigurasi Server Odoo
+          </h2>
+          <p class="text-xs text-slate-400">Tentukan URL, Nama Database, dan API Key untuk server Odoo 19 (Sumber) dan Odoo 20 (Target).</p>
+        </div>
+        <button id="btn-save-config" class="inline-flex items-center px-4 py-2 border border-indigo-500/50 text-xs font-medium rounded-lg text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/20 transition">
+          <svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>
+          Simpan Konfigurasi
+        </button>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- SOURCE CARD -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-sm space-y-4 relative overflow-hidden">
+          <div class="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-500 to-amber-600"></div>
+          <div class="flex items-center justify-between">
+            <span class="inline-flex items-center text-xs font-semibold px-2.5 py-1 rounded-md bg-amber-950/60 border border-amber-800/40 text-amber-300">
+              📤 SOURCE (Odoo 19.0)
+            </span>
+            <span id="source-test-badge" class="text-xs px-2 py-0.5 rounded text-slate-400 font-medium">Belum diuji</span>
+          </div>
+
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs font-medium text-slate-300 mb-1">Server URL</label>
+              <input type="text" id="src-url" class="w-full bg-slate-950 border border-slate-700/80 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="https://odoo19.example.com" value="{{ config.source_odoo_19.url }}">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-slate-300 mb-1">Nama Database</label>
+              <input type="text" id="src-db" class="w-full bg-slate-950 border border-slate-700/80 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="odoo19_db" value="{{ config.source_odoo_19.db }}">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-slate-300 mb-1">API Key (Bearer)</label>
+              <input type="password" id="src-key" class="w-full bg-slate-950 border border-slate-700/80 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="API Key" value="{{ config.source_odoo_19.api_key }}">
+            </div>
+          </div>
+
+          <div class="pt-2 flex items-center justify-between border-t border-slate-800/80">
+            <button id="btn-test-src" class="inline-flex items-center px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition">
+              <svg class="w-3.5 h-3.5 mr-1.5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+              Test Koneksi Source
+            </button>
+            <span class="text-[11px] text-slate-400 truncate max-w-[200px]" id="src-details">-</span>
+          </div>
+        </div>
+
+        <!-- TARGET CARD -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-sm space-y-4 relative overflow-hidden">
+          <div class="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 to-teal-500"></div>
+          <div class="flex items-center justify-between">
+            <span class="inline-flex items-center text-xs font-semibold px-2.5 py-1 rounded-md bg-emerald-950/60 border border-emerald-800/40 text-emerald-300">
+              📥 TARGET (Odoo 20.0)
+            </span>
+            <span id="target-test-badge" class="text-xs px-2 py-0.5 rounded text-slate-400 font-medium">Belum diuji</span>
+          </div>
+
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs font-medium text-slate-300 mb-1">Server URL</label>
+              <input type="text" id="tgt-url" class="w-full bg-slate-950 border border-slate-700/80 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="https://odoo20.example.com" value="{{ config.target_odoo_20.url }}">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-slate-300 mb-1">Nama Database</label>
+              <input type="text" id="tgt-db" class="w-full bg-slate-950 border border-slate-700/80 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="odoo20_db" value="{{ config.target_odoo_20.db }}">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-slate-300 mb-1">API Key (Bearer)</label>
+              <input type="password" id="tgt-key" class="w-full bg-slate-950 border border-slate-700/80 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="API Key" value="{{ config.target_odoo_20.api_key }}">
+            </div>
+          </div>
+
+          <div class="pt-2 flex items-center justify-between border-t border-slate-800/80">
+            <button id="btn-test-tgt" class="inline-flex items-center px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition">
+              <svg class="w-3.5 h-3.5 mr-1.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+              Test Koneksi Target
+            </button>
+            <span class="text-[11px] text-slate-400 truncate max-w-[200px]" id="tgt-details">-</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 2: MIGRATION CONTROL PANEL & PROGRESS -->
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm space-y-6">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h2 class="text-base font-semibold text-white">Panel Eksekusi Migrasi Pure API</h2>
+          <p class="text-xs text-slate-400 mt-0.5">Jalankan migrasi penuh all-in-one atau eksekusi modular per fase.</p>
+        </div>
+
+        <!-- ACTION BUTTONS -->
+        <div class="flex flex-wrap items-center gap-2.5">
+          <button id="btn-run-all" class="inline-flex items-center px-5 py-2.5 rounded-xl font-semibold text-xs text-white bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 hover:from-indigo-500 hover:to-violet-500 shadow-lg shadow-indigo-600/30 transition transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed">
+            <svg class="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"/></svg>
+            Jalankan Full Migrasi (All-in-One)
+          </button>
+
+          <div class="h-6 w-px bg-slate-800 hidden md:block"></div>
+
+          <button id="btn-run-master" class="btn-phase px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition">
+            1. Master Data
+          </button>
+          <button id="btn-run-transactions" class="btn-phase px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition">
+            2. Transaksi Move
+          </button>
+          <button id="btn-run-reconcile" class="btn-phase px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition">
+            3. Rekonsiliasi
+          </button>
+          <button id="btn-run-verify" class="btn-phase px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition">
+            4. Audit & Verifikasi
+          </button>
+        </div>
+      </div>
+
+      <!-- PROGRESS BAR -->
+      <div class="space-y-2">
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-slate-400 font-medium" id="progress-stage">Siap memulai migrasi...</span>
+          <span class="text-indigo-400 font-bold font-mono" id="progress-percent">0%</span>
+        </div>
+        <div class="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
+          <div id="progress-bar" class="bg-gradient-to-r from-indigo-500 to-violet-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 3: REAL-TIME CONSOLE / TERMINAL -->
+    <section class="bg-slate-950 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+      <!-- Terminal Header -->
+      <div class="bg-slate-900 px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          <span class="w-3 h-3 rounded-full bg-rose-500/80 inline-block"></span>
+          <span class="w-3 h-3 rounded-full bg-amber-500/80 inline-block"></span>
+          <span class="w-3 h-3 rounded-full bg-emerald-500/80 inline-block"></span>
+          <span class="ml-2 text-xs font-mono font-medium text-slate-400">Live Migration Console (SSE Stream)</span>
+        </div>
+
+        <div class="flex items-center space-x-3 text-xs">
+          <label class="flex items-center space-x-1.5 text-slate-400 cursor-pointer select-none">
+            <input type="checkbox" id="chk-autoscroll" checked class="rounded bg-slate-800 border-slate-700 text-indigo-500 focus:ring-0">
+            <span>Auto-scroll</span>
+          </label>
+          <button id="btn-clear-logs" class="text-slate-400 hover:text-slate-200 transition">Bersihkan</button>
+          <button id="btn-copy-logs" class="text-slate-400 hover:text-slate-200 transition">Salin Log</button>
+        </div>
+      </div>
+
+      <!-- Terminal Body -->
+      <div id="terminal-body" class="p-4 font-mono text-xs leading-relaxed text-slate-300 h-80 overflow-y-auto space-y-1 bg-slate-950 select-text">
+        <div class="text-slate-500">[System] Terhubung ke SSE migration stream. Menunggu instruksi...</div>
+      </div>
+    </section>
+
+    <!-- SECTION 4: AUDIT & VERIFICATION REPORT -->
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm space-y-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-base font-semibold text-white">Hasil Audit & Verifikasi Buku Besar</h2>
+          <p class="text-xs text-slate-400 mt-0.5">Perbandingan Trial Balance dan Saldo Kas/Bank antara Odoo 19 dan Odoo 20.</p>
+        </div>
+        <button id="btn-refresh-audit" class="inline-flex items-center px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition">
+          <svg class="w-3.5 h-3.5 mr-1.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+          Muat Ulang Audit
+        </button>
+      </div>
+
+      <!-- KPI METRIC CARDS -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="bg-slate-950 border border-slate-800/80 rounded-xl p-4">
+          <span class="text-xs text-slate-400 font-medium">Trial Balance Debit</span>
+          <div class="text-lg font-bold font-mono text-white mt-1" id="audit-debit">-</div>
+          <span class="text-[11px] text-slate-500 mt-0.5 block" id="audit-debit-diff">Selisih: -</span>
+        </div>
+
+        <div class="bg-slate-950 border border-slate-800/80 rounded-xl p-4">
+          <span class="text-xs text-slate-400 font-medium">Trial Balance Credit</span>
+          <div class="text-lg font-bold font-mono text-white mt-1" id="audit-credit">-</div>
+          <span class="text-[11px] text-slate-500 mt-0.5 block" id="audit-credit-diff">Selisih: -</span>
+        </div>
+
+        <div class="bg-slate-950 border border-slate-800/80 rounded-xl p-4 flex flex-col justify-between">
+          <span class="text-xs text-slate-400 font-medium">Status Keseimbangan Buku Besar</span>
+          <div class="mt-1">
+            <span id="audit-balanced-badge" class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-semibold bg-slate-800 text-slate-300">
+              Belum Diverifikasi
+            </span>
+          </div>
+          <span class="text-[11px] text-slate-500 mt-1 block">Toleransi selisih = Rp 0,00</span>
+        </div>
+      </div>
+
+      <!-- JOURNAL BALANCES TABLE -->
+      <div class="overflow-hidden border border-slate-800/80 rounded-xl">
+        <table class="min-w-full divide-y divide-slate-800 text-xs">
+          <thead class="bg-slate-950/80 text-slate-400 font-medium">
+            <tr>
+              <th scope="col" class="py-3 px-4 text-left">Nama Jurnal Kas & Bank</th>
+              <th scope="col" class="py-3 px-4 text-right">Saldo Odoo 19</th>
+              <th scope="col" class="py-3 px-4 text-right">Saldo Odoo 20</th>
+              <th scope="col" class="py-3 px-4 text-center">Status Keselarasan</th>
+            </tr>
+          </thead>
+          <tbody id="journals-table-body" class="divide-y divide-slate-800/60 bg-slate-900/40 font-mono">
+            <tr>
+              <td colspan="4" class="py-4 text-center text-slate-500 font-sans">Klik "Muat Ulang Audit" untuk menampilkan perbandingan saldo kas & bank terkini.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- FOOTER -->
+  <footer class="border-t border-slate-800/60 py-4 text-center text-xs text-slate-500">
+    Odoo Migration Studio • Dijalankan dengan Python via <code class="text-indigo-400">uv</code> • Arsitektur 100% Pure External API JSON-2
+  </footer>
+
+  <!-- CLIENT-SIDE JS -->
+  <script>
+    const el = (id) => document.getElementById(id);
+
+    // STATE
+    let isRunning = false;
+    let autoScroll = true;
+
+    // EVENT SOURCE (SSE) CONNECTION
+    const evtSource = new EventSource("/api/stream");
+
+    evtSource.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        handleStreamEvent(data);
+      } catch (err) {
+        console.error("Parse error:", err);
+      }
+    };
+
+    function handleStreamEvent(data) {
+      if (data.type === "init") {
+        updateStatus(data.is_running, data.state, data.stage);
+        updateProgress(data.progress, data.stage);
+        if (data.logs && data.logs.length) {
+          el("terminal-body").innerHTML = "";
+          data.logs.forEach(appendLog);
+        }
+      } else if (data.type === "log") {
+        appendLog(data);
+      } else if (data.type === "progress") {
+        updateProgress(data.percent, data.stage);
+      } else if (data.type === "status") {
+        updateStatus(data.is_running, data.state, data.stage);
+        if (!data.is_running && data.state === "completed") {
+          loadAuditData(); // Auto refresh audit saat selesai
+        }
+      }
+    }
+
+    function appendLog(log) {
+      const container = el("terminal-body");
+      const line = document.createElement("div");
+      
+      let colorClass = "text-slate-300";
+      if (log.level === "error" || (log.text && log.text.includes("❌"))) colorClass = "text-rose-400";
+      else if (log.level === "warning" || (log.text && log.text.includes("⚠️"))) colorClass = "text-amber-400";
+      else if (log.level === "success" || (log.text && (log.text.includes("✅") || log.text.includes("🎉")))) colorClass = "text-emerald-400 font-semibold";
+      else if (log.text && log.text.startsWith("⚡")) colorClass = "text-cyan-400";
+
+      line.className = `${colorClass} py-0.5 break-words`;
+      const timeSpan = log.time ? `<span class="text-slate-500 select-none mr-2">[${log.time}]</span>` : "";
+      line.innerHTML = `${timeSpan}${escapeHtml(log.text)}`;
+      container.appendChild(line);
+
+      if (autoScroll) {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+
+    function updateProgress(percent, stage) {
+      el("progress-bar").style.width = `${percent}%`;
+      el("progress-percent").innerText = `${percent}%`;
+      if (stage) el("progress-stage").innerText = stage;
+    }
+
+    function updateStatus(running, state, stage) {
+      isRunning = running;
+      const indicator = el("live-indicator");
+      const text = el("system-status-text");
+
+      // Update button states
+      el("btn-run-all").disabled = running;
+      document.querySelectorAll(".btn-phase").forEach(b => b.disabled = running);
+
+      if (running) {
+        indicator.className = "w-2 h-2 rounded-full mr-2 bg-amber-400 animate-ping";
+        text.innerText = `Sedang Berjalan (${stage || state})`;
+      } else if (state === "completed") {
+        indicator.className = "w-2 h-2 rounded-full mr-2 bg-emerald-400";
+        text.innerText = "Selesai Sempurna";
+      } else if (state === "error") {
+        indicator.className = "w-2 h-2 rounded-full mr-2 bg-rose-400";
+        text.innerText = "Gagal";
+      } else {
+        indicator.className = "w-2 h-2 rounded-full mr-2 bg-slate-400";
+        text.innerText = "Ready";
+      }
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.innerText = text || "";
+      return div.innerHTML;
+    }
+
+    // ACTIONS
+    el("chk-autoscroll").addEventListener("change", (e) => autoScroll = e.target.checked);
+    el("btn-clear-logs").addEventListener("click", () => el("terminal-body").innerHTML = "");
+    el("btn-copy-logs").addEventListener("click", () => {
+      const text = el("terminal-body").innerText;
+      navigator.clipboard.writeText(text).then(() => alert("Log berhasil disalin!"));
+    });
+
+    // TEST SOURCE
+    el("btn-test-src").addEventListener("click", async () => {
+      const btn = el("btn-test-src");
+      const badge = el("source-test-badge");
+      const details = el("src-details");
+      btn.disabled = true;
+      badge.className = "text-xs px-2 py-0.5 rounded bg-amber-950 text-amber-400 font-medium";
+      badge.innerText = "Menguji...";
+
+      try {
+        const res = await fetch("/api/test-connection", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            url: el("src-url").value,
+            db: el("src-db").value,
+            api_key: el("src-key").value
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          badge.className = "text-xs px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 font-medium";
+          badge.innerText = "Terhubung ✅";
+          details.innerText = `${data.company_name} (${data.currency})`;
+        } else {
+          badge.className = "text-xs px-2 py-0.5 rounded bg-rose-950 text-rose-400 font-medium";
+          badge.innerText = "Gagal ❌";
+          details.innerText = data.error || "Gagal";
+        }
+      } catch (e) {
+        badge.innerText = "Error ❌";
+        details.innerText = e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // TEST TARGET
+    el("btn-test-tgt").addEventListener("click", async () => {
+      const btn = el("btn-test-tgt");
+      const badge = el("target-test-badge");
+      const details = el("tgt-details");
+      btn.disabled = true;
+      badge.className = "text-xs px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 font-medium";
+      badge.innerText = "Menguji...";
+
+      try {
+        const res = await fetch("/api/test-connection", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            url: el("tgt-url").value,
+            db: el("tgt-db").value,
+            api_key: el("tgt-key").value
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          badge.className = "text-xs px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 font-medium";
+          badge.innerText = "Terhubung ✅";
+          details.innerText = `${data.company_name} (${data.currency})`;
+        } else {
+          badge.className = "text-xs px-2 py-0.5 rounded bg-rose-950 text-rose-400 font-medium";
+          badge.innerText = "Gagal ❌";
+          details.innerText = data.error || "Gagal";
+        }
+      } catch (e) {
+        badge.innerText = "Error ❌";
+        details.innerText = e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // SAVE CONFIG
+    el("btn-save-config").addEventListener("click", async () => {
+      const btn = el("btn-save-config");
+      btn.disabled = true;
+      try {
+        const payload = {
+          source_odoo_19: {
+            url: el("src-url").value,
+            db: el("src-db").value,
+            api_key: el("src-key").value
+          },
+          target_odoo_20: {
+            url: el("tgt-url").value,
+            db: el("tgt-db").value,
+            api_key: el("tgt-key").value
+          }
+        };
+        const res = await fetch("/api/config", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.success) {
+          el("header-db-name").innerText = data.db_filename;
+          alert("✅ Konfigurasi berhasil disimpan!");
+        } else {
+          alert("❌ Gagal menyimpan konfigurasi: " + data.message);
+        }
+      } catch (err) {
+        alert("❌ Error: " + err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // TRIGGER MIGRATION
+    async function triggerMigrate(phase) {
+      if (isRunning) return;
+      if (!confirm(`Mulai eksekusi migrasi fase: ${phase.toUpperCase()}?`)) return;
+
+      try {
+        const res = await fetch("/api/migrate", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ phase })
+        });
+        const data = await res.json();
+        if (!data.success) {
+          alert("Gagal memulai: " + data.detail);
+        }
+      } catch (err) {
+        alert("Error memicu migrasi: " + err.message);
+      }
+    }
+
+    el("btn-run-all").addEventListener("click", () => triggerMigrate("all"));
+    el("btn-run-master").addEventListener("click", () => triggerMigrate("master"));
+    el("btn-run-transactions").addEventListener("click", () => triggerMigrate("transactions"));
+    el("btn-run-reconcile").addEventListener("click", () => triggerMigrate("reconcile"));
+    el("btn-run-verify").addEventListener("click", () => triggerMigrate("verify"));
+
+    // LOAD AUDIT DATA
+    async function loadAuditData() {
+      const tbody = el("journals-table-body");
+      try {
+        tbody.innerHTML = `<tr><td colspan="4" class="py-4 text-center text-slate-400 font-sans">Mengambil data audit dari Odoo 19 & Odoo 20...</td></tr>`;
+        const res = await fetch("/api/verify");
+        const data = await res.json();
+
+        if (data.success) {
+          const tb = data.trial_balance;
+          el("audit-debit").innerText = tb.debit_20;
+          el("audit-debit-diff").innerText = `Diff vs Odoo 19: ${tb.debit_diff}`;
+          el("audit-credit").innerText = tb.credit_20;
+          el("audit-credit-diff").innerText = `Diff vs Odoo 19: ${tb.credit_diff}`;
+
+          const badge = el("audit-balanced-badge");
+          if (tb.balanced) {
+            badge.className = "inline-flex items-center px-2.5 py-1 rounded-md text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800/50";
+            badge.innerText = "✅ SEIMBANG (Zero Discrepancy)";
+          } else {
+            badge.className = "inline-flex items-center px-2.5 py-1 rounded-md text-xs font-semibold bg-rose-950 text-rose-400 border border-rose-800/50";
+            badge.innerText = "⚠️ TERDAPAT SELISIH";
+          }
+
+          if (data.journals && data.journals.length) {
+            tbody.innerHTML = data.journals.map(j => `
+              <tr class="hover:bg-slate-800/40 transition">
+                <td class="py-2.5 px-4 font-sans font-medium text-slate-200">${escapeHtml(j.name)}</td>
+                <td class="py-2.5 px-4 text-right text-slate-300">${j.balance_19}</td>
+                <td class="py-2.5 px-4 text-right text-slate-100 font-semibold">${j.balance_20}</td>
+                <td class="py-2.5 px-4 text-center font-sans">
+                  ${j.match 
+                    ? `<span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800/40">MATCH</span>`
+                    : `<span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-rose-950 text-rose-400 border border-rose-800/40">DIFF</span>`
+                  }
+                </td>
+              </tr>
+            `).join("");
+          } else {
+            tbody.innerHTML = `<tr><td colspan="4" class="py-4 text-center text-slate-500 font-sans">Tidak ada data jurnal kas/bank ditemukan.</td></tr>`;
+          }
+        } else {
+          tbody.innerHTML = `<tr><td colspan="4" class="py-4 text-center text-rose-400 font-sans">Gagal memuat audit: ${data.error}</td></tr>`;
+        }
+      } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="4" class="py-4 text-center text-rose-400 font-sans">Error: ${err.message}</td></tr>`;
+      }
+    }
+
+    el("btn-refresh-audit").addEventListener("click", loadAuditData);
+
+    // Logout handling
+    const logoutBtn = el("btn-logout");
+    if (logoutBtn) {
+      logoutBtn.addEventListener("click", async () => {
+        try {
+          await fetch("/api/logout", { method: "POST" });
+        } catch (e) {
+          console.error(e);
+        } finally {
+          window.location.href = "/login";
+        }
+      });
+    }
+
+    // Initial audit load
+    setTimeout(loadAuditData, 1000);
+  </script>
+</body>
+</html>

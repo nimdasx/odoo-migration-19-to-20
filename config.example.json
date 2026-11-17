@@ -1,0 +1,19 @@
+{
+  "source_odoo_19": {
+    "url": "http://localhost:1969",
+    "db": "odoo19_production",
+    "api_key": "YOUR_ODOO_19_API_KEY",
+    "endpoint": "/json/2"
+  },
+  "target_odoo_20": {
+    "url": "http://localhost:2069",
+    "db": "odoo20_clean",
+    "api_key": "YOUR_ODOO_20_API_KEY",
+    "endpoint": "/json/2"
+  },
+  "web_auth": {
+    "enabled": true,
+    "username": "admin",
+    "password": "CHANGE_ME"
+  }
+}

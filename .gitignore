@@ -1,0 +1,26 @@
+# Config & Secrets
+config.json
+.env
+*.env
+
+# SQLite mapping databases (berisi data riil transaksi pemetaan)
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+!data/.gitkeep
+
+# Local runtime logs
+logs/*.log
+!logs/.gitkeep
+
+# Local test mock containers (hanya untuk simulasi lokal & berisi path lokal)
+docker-odoo19/
+docker-odoo20/
+
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+.venv/
+env/
+.pytest_cache/

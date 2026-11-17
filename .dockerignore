@@ -1,0 +1,13 @@
+config.json
+.venv
+__pycache__
+*.pyc
+.git
+.gitignore
+.python-version
+data/*.db
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+docker-odoo19/
+docker-odoo20/
