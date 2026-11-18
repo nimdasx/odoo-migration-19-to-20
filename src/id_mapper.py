@@ -67,6 +67,16 @@ class IdMapper:
             self.conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_id_mapping_model ON id_mapping(model);
             """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS migration_errors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    phase TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    old_id INTEGER,
+                    message TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
     def set_mapping(self, model: str, old_id: int, new_id: int, notes: Optional[str] = None) -> None:
         """Menyimpan atau memperbarui mapping 1 record."""
@@ -116,6 +126,37 @@ class IdMapper:
             cursor.execute("SELECT COUNT(*) FROM id_mapping WHERE model = ?", (model,))
         else:
             cursor.execute("SELECT COUNT(*) FROM id_mapping")
+        return cursor.fetchone()[0]
+
+    def record_error(self, phase: str, model: str, old_id: Optional[int], message: str) -> None:
+        """Mencatat kegagalan per-record agar migrasi tetap lanjut & dapat diaudit."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO migration_errors (phase, model, old_id, message) VALUES (?, ?, ?, ?)",
+                (phase, model, old_id, str(message)[:2000])
+            )
+
+    def get_errors(self, phase: Optional[str] = None) -> List[Dict]:
+        """Mengambil daftar kegagalan yang tercatat."""
+        cursor = self.conn.cursor()
+        if phase:
+            cursor.execute(
+                "SELECT phase, model, old_id, message, created_at FROM migration_errors WHERE phase = ? ORDER BY id",
+                (phase,)
+            )
+        else:
+            cursor.execute("SELECT phase, model, old_id, message, created_at FROM migration_errors ORDER BY id")
+        return [
+            {"phase": r[0], "model": r[1], "old_id": r[2], "message": r[3], "created_at": r[4]}
+            for r in cursor.fetchall()
+        ]
+
+    def count_errors(self, phase: Optional[str] = None) -> int:
+        cursor = self.conn.cursor()
+        if phase:
+            cursor.execute("SELECT COUNT(*) FROM migration_errors WHERE phase = ?", (phase,))
+        else:
+            cursor.execute("SELECT COUNT(*) FROM migration_errors")
         return cursor.fetchone()[0]
 
     def close(self):

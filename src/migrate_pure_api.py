@@ -54,7 +54,10 @@ def migrate_master_data(c19: OdooClient, c20: OdooClient, mapper: IdMapper):
     # 2. Currencies
     print("\n💵 2. Sinkronisasi Mata Uang (res.currency)...")
     currs19 = c19.search_read("res.currency", [("active", "=", True)], ["id", "name"])
-    currs20 = c20.search_read("res.currency", [], ["id", "name", "active"])
+    # Sertakan mata uang nonaktif di target (mis. IDR bawaan yang belum diaktifkan);
+    # tanpa active_test=False mata uang tsb tidak terlihat dan dilewati diam-diam.
+    currs20 = c20.call("res.currency", "search_read", domain=[], fields=["id", "name", "active"],
+                       context={"active_test": False})
     map_curr20 = {c["name"]: c for c in currs20}
     for c in currs19:
         name = c["name"]
@@ -64,6 +67,21 @@ def migrate_master_data(c19: OdooClient, c20: OdooClient, mapper: IdMapper):
                 c20.write("res.currency", [target["id"]], {"active": True})
             mapper.set_mapping("res.currency", c["id"], target["id"], notes=f"Currency: {name}")
             print(f"   ✅ Mata uang {name} terpetakan: {c['id']} -> {target['id']}")
+        else:
+            print(f"   ⚠️ Mata uang {name} tidak ditemukan di target — tidak terpetakan!")
+
+    # Samakan mata uang perusahaan dengan sumber (memengaruhi format tampilan
+    # & pembulatan). Bila target sudah punya jurnal, Odoo menolak perubahan
+    # mata uang — cukup peringatkan, jangan gagalkan seluruh fase.
+    if comp19.get("currency_id"):
+        src_curr_name = comp19["currency_id"][1]
+        target_curr = map_curr20.get(src_curr_name)
+        if target_curr and comp20.get("currency_id") and comp20["currency_id"][0] != target_curr["id"]:
+            try:
+                c20.write("res.company", [comp20["id"]], {"currency_id": target_curr["id"]})
+                print(f"   ✅ Mata uang perusahaan diset ke {src_curr_name}.")
+            except OdooAPIError as e:
+                print(f"   ⚠️ Mata uang perusahaan tidak bisa diubah (sudah ada jurnal?): {e}")
 
     # 3. Tax Groups
     print("\n🏷️ 3. Sinkronisasi Grup Pajak (account.tax.group)...")
@@ -254,7 +272,9 @@ def pair_lines(old_lines: List[Dict[str, Any]], created_lines_20: List[Dict[str,
                 pairs.append((o["id"], n["id"], o.get("name") or "/"))
             return pairs
 
-    # Fallback jika urutan berbeda
+    # Fallback jika urutan berbeda: cocokkan berdasarkan akun + debit/credit,
+    # lalu akun + name. Jika tetap tidak ketemu, GAGAL KERAS (jangan menebak),
+    # karena mapping baris yang salah akan merusak rekonsiliasi di fase berikutnya.
     available_20 = list(created_lines_20)
     for o in old_lines:
         o_acc = mapper.get_new_id("account.account", o["account_id"][0])
@@ -264,12 +284,20 @@ def pair_lines(old_lines: List[Dict[str, Any]], created_lines_20: List[Dict[str,
             if n_acc == o_acc and abs(n["debit"] - o["debit"]) < 0.01 and abs(n["credit"] - o["credit"]) < 0.01:
                 matched_idx = idx
                 break
-        if matched_idx is not None:
-            n = available_20.pop(matched_idx)
-            pairs.append((o["id"], n["id"], o.get("name") or "/"))
-        elif available_20:
-            n = available_20.pop(0)
-            pairs.append((o["id"], n["id"], o.get("name") or "/"))
+        if matched_idx is None:
+            for idx, n in enumerate(available_20):
+                n_acc = n["account_id"][0] if isinstance(n["account_id"], (list, tuple)) else n["account_id"]
+                if n_acc == o_acc and (n.get("name") or "/") == (o.get("name") or "/"):
+                    matched_idx = idx
+                    break
+        if matched_idx is None:
+            raise ValueError(
+                f"Baris lama ID {o['id']} (akun {o['account_id']}, debit {o['debit']}, credit {o['credit']}) "
+                f"tidak menemukan padanan yang sah di Odoo 20. Jumlah baris sumber={len(old_lines)}, "
+                f"target={len(created_lines_20)}. Mapping dibatalkan agar tidak salah rekonsiliasi."
+            )
+        n = available_20.pop(matched_idx)
+        pairs.append((o["id"], n["id"], o.get("name") or "/"))
     return pairs
 
 
@@ -297,6 +325,21 @@ def build_lines_payload(old_lines: List[Dict[str, Any]], mapper: IdMapper) -> Li
                 line_vals["currency_id"] = curr_new
                 if "amount_currency" in l:
                     line_vals["amount_currency"] = l["amount_currency"]
+        # Pajak & termin: pulihkan relasi pajak agar laporan PPN/aging di Odoo 20 benar.
+        # Aman dari duplikasi baris pajak karena baris hasil salinan tidak memiliki
+        # display_type='product' / tax_repartition_line_id, sehingga tidak disinkron
+        # ulang oleh ORM Odoo (lihat account.move._sync_tax_lines).
+        if l.get("tax_ids"):
+            mapped_taxes = [t for t in (mapper.get_new_id("account.tax", t_old) for t_old in l["tax_ids"]) if t]
+            if mapped_taxes:
+                line_vals["tax_ids"] = [(6, 0, mapped_taxes)]
+        if l.get("tax_line_id"):
+            tl_old = l["tax_line_id"][0] if isinstance(l["tax_line_id"], (list, tuple)) else l["tax_line_id"]
+            tl_new = mapper.get_new_id("account.tax", tl_old)
+            if tl_new:
+                line_vals["tax_line_id"] = tl_new
+        if l.get("date_maturity"):
+            line_vals["date_maturity"] = l["date_maturity"]
         if l.get("analytic_distribution") and isinstance(l["analytic_distribution"], dict):
             new_dist = {}
             for old_aa_id_str, pct in l["analytic_distribution"].items():
@@ -312,11 +355,15 @@ def build_lines_payload(old_lines: List[Dict[str, Any]], mapper: IdMapper) -> Li
     return new_lines
 
 
-def migrate_transactions_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMapper, limit: Optional[int] = None):
-    print(f"\n{'='*70}\n[FASE 3] MIGRASI TRANSAKSI DUAL-ROUTE (100% PURE API)\n{'='*70}")
+def migrate_transactions_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMapper, limit: Optional[int] = None,
+                                  log=None, progress=None):
+    _log = log or (lambda text, level="info": print(text))
+    _progress = progress or (lambda percent, stage: None)
+
+    _log(f"\n{'='*70}\n[FASE 3] MIGRASI TRANSAKSI DUAL-ROUTE (100% PURE API)\n{'='*70}")
 
     # 1. Ekstrak data bank statement lines dari Odoo 19 untuk pengelompokan
-    print("📥 Mengambil indeks mutasi bank Odoo 19...")
+    _log("📥 Mengambil indeks mutasi bank Odoo 19...")
     st_lines_19 = c19.search_read(
         "account.bank.statement.line",
         [],
@@ -324,200 +371,275 @@ def migrate_transactions_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMa
         order="id asc"
     )
     st_by_move_id = {st["move_id"][0]: st for st in st_lines_19 if st.get("move_id")}
-    print(f"📋 Ditemukan {len(st_lines_19)} mutasi bank terhubung.")
+    _log(f"📋 Ditemukan {len(st_lines_19)} mutasi bank terhubung.")
 
     # 2. Ekstrak seluruh entri transaksi account.move dari Odoo 19
-    print("📥 Mengambil seluruh header jurnal transaksi Odoo 19...")
-    move_fields = ["id", "name", "date", "ref", "state", "move_type", "journal_id", "partner_id"]
+    _log("📥 Mengambil seluruh header jurnal transaksi Odoo 19...")
+    move_fields = ["id", "name", "date", "ref", "state", "move_type", "journal_id", "partner_id",
+                   "invoice_date", "invoice_date_due"]
     moves_19 = c19.search_read("account.move", [], move_fields, order="date asc, id asc", limit=limit)
     total_moves = len(moves_19)
-    print(f"📋 Ditemukan {total_moves} dokumen jurnal yang siap dimigrasikan.")
+    _log(f"📋 Ditemukan {total_moves} dokumen jurnal yang siap dimigrasikan.")
 
     is_remote_target = "odoo.com" in c20.url or c20.url.startswith("https://") or ("localhost" not in c20.url and "127.0.0.1" not in c20.url)
     if is_remote_target:
-        print("🌐 Target terdeteksi sebagai Cloud / Remote Server. Mengaktifkan adaptive pacing & auto-retry rate limit.")
+        _log("🌐 Target terdeteksi sebagai Cloud / Remote Server. Mengaktifkan adaptive pacing & auto-retry rate limit.")
 
-    # 3. Proses migrasi per dokumen
-    existing_moves_20 = c20.search_read("account.move", [], ["id", "name", "statement_line_id"])
+    # 3. Indeks move eksisting di Odoo 20 untuk auto-recovery & pencegahan duplikasi.
+    #    Sertakan journal_id & date agar adopsi hanya terjadi bila benar-benar move yang sama.
+    existing_moves_20 = c20.search_read("account.move", [], ["id", "name", "journal_id", "date", "statement_line_id"])
     m20_by_name = {m["name"]: m for m in existing_moves_20 if m.get("name") and m["name"] != "/"}
 
     success_bank = 0
     success_general = 0
     skipped = 0
+    failed = 0
     t0 = time.time()
 
-    line_fields = ["id", "name", "account_id", "partner_id", "debit", "credit", "currency_id", "amount_currency", "analytic_distribution"]
+    line_fields = ["id", "name", "account_id", "partner_id", "debit", "credit", "currency_id",
+                   "amount_currency", "analytic_distribution", "tax_ids", "tax_line_id", "date_maturity"]
+    m20_line_fields = ["id", "name", "account_id", "debit", "credit"]
 
     for i, m in enumerate(moves_19, 1):
         old_move_id = m["id"]
         original_name = m["name"]
 
-        # Cek jika move sudah pernah dimigrasikan di SQLite
-        if mapper.has_mapping("account.move", old_move_id):
-            skipped += 1
-            continue
+        try:
+            # Cek apakah move dengan nomor sequence ini sudah ada di Odoo 20 (auto-recovery).
+            # Adopsi HANYA bila jurnal & tanggal cocok; jika tidak, ini move berbeda -> buat baru.
+            adopt_candidate = None
+            if original_name and original_name != "/" and original_name in m20_by_name:
+                cand = m20_by_name[original_name]
+                nj = mapper.get_new_id("account.journal", m["journal_id"][0])
+                cj = cand["journal_id"][0] if isinstance(cand.get("journal_id"), (list, tuple)) else cand.get("journal_id")
+                if nj and cj == nj and cand.get("date") == m["date"]:
+                    adopt_candidate = cand
+                else:
+                    _log(f"⚠️ Nama '{original_name}' sudah ada di Odoo 20 tetapi jurnal/tanggal berbeda; diperlakukan sebagai move baru.", "warning")
 
-        # Cek apakah move dengan nomor sequence asli ini sudah ada di Odoo 20 (auto-recovery dari run sebelumnya)
-        if original_name and original_name != "/" and original_name in m20_by_name:
-            existing_20 = m20_by_name[original_name]
-            new_move_id = existing_20["id"]
-            mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
-            m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": False}
+            if mapper.has_mapping("account.move", old_move_id):
+                skipped += 1
+            elif adopt_candidate is not None:
+                # ---- Jalur adopsi: petakan move yang sudah ada, dengan validasi nominal ----
+                new_move_id = adopt_candidate["id"]
+                old_lines = c19.search_read("account.move.line", [("move_id", "=", old_move_id)], line_fields, order="id asc")
+                m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], m20_line_fields, order="id asc")
+                if abs(sum(l["debit"] for l in old_lines) - sum(l["debit"] for l in m20_lines)) > 0.01 or \
+                   abs(sum(l["credit"] for l in old_lines) - sum(l["credit"] for l in m20_lines)) > 0.01:
+                    raise ValueError(f"Adopsi '{original_name}' ditolak: total debit/credit Odoo 20 berbeda dari sumber.")
 
-            if old_move_id in st_by_move_id:
-                st19 = st_by_move_id[old_move_id]
-                st20_id = existing_20["statement_line_id"][0] if existing_20.get("statement_line_id") else None
-                if not st20_id:
-                    st20_recs = c20.search_read("account.bank.statement.line", [("move_id", "=", new_move_id)], ["id"], limit=1)
-                    if st20_recs:
-                        st20_id = st20_recs[0]["id"]
-                if st20_id:
-                    mapper.set_mapping("account.bank.statement.line", st19["id"], st20_id, notes=original_name)
+                mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
+                if old_move_id in st_by_move_id:
+                    st19 = st_by_move_id[old_move_id]
+                    st20_id = adopt_candidate["statement_line_id"][0] if adopt_candidate.get("statement_line_id") else None
+                    if not st20_id:
+                        st20_recs = c20.search_read("account.bank.statement.line", [("move_id", "=", new_move_id)], ["id"], limit=1)
+                        if st20_recs:
+                            st20_id = st20_recs[0]["id"]
+                    if st20_id:
+                        mapper.set_mapping("account.bank.statement.line", st19["id"], st20_id, notes=original_name)
 
-            old_lines = c19.search_read("account.move.line", [("move_id", "=", old_move_id)], line_fields, order="id asc")
-            m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], ["id", "account_id", "debit", "credit"], order="id asc")
-            line_pairs = pair_lines(old_lines, m20_lines, mapper)
-            mapper.set_mappings_batch("account.move.line", line_pairs)
-            skipped += 1
-            continue
+                line_pairs = pair_lines(old_lines, m20_lines, mapper)
+                mapper.set_mappings_batch("account.move.line", line_pairs)
+                skipped += 1
+            else:
+                new_journal_id = mapper.get_new_id("account.journal", m["journal_id"][0])
+                if not new_journal_id:
+                    raise ValueError(f"Jurnal lama {m['journal_id']} belum terpetakan!")
+                new_partner_id = mapper.get_new_id("res.partner", m["partner_id"][0]) if m.get("partner_id") else False
 
-        new_journal_id = mapper.get_new_id("account.journal", m["journal_id"][0])
-        new_partner_id = mapper.get_new_id("res.partner", m["partner_id"][0]) if m.get("partner_id") else False
+                old_lines = c19.search_read("account.move.line", [("move_id", "=", old_move_id)], line_fields, order="id asc")
+                if not old_lines:
+                    skipped += 1
+                else:
+                    new_lines_payload = build_lines_payload(old_lines, mapper)
 
-        # Ambil baris jurnal asli
-        old_lines = c19.search_read("account.move.line", [("move_id", "=", old_move_id)], line_fields, order="id asc")
-        if not old_lines:
-            continue
-        new_lines_payload = build_lines_payload(old_lines, mapper)
+                    if old_move_id in st_by_move_id:
+                        # ==========================================================
+                        # RUTE A: MUTASI KAS & BANK VIA account.bank.statement.line
+                        # ==========================================================
+                        st19 = st_by_move_id[old_move_id]
+                        st_vals = {
+                            "journal_id": new_journal_id,
+                            "date": m["date"],
+                            "payment_ref": st19.get("payment_ref") or m.get("ref") or "/",
+                            "amount": st19.get("amount", 0.0),
+                            "partner_id": new_partner_id,
+                            "line_ids": new_lines_payload,
+                        }
+                        new_st_id = c20.create("account.bank.statement.line", [st_vals])[0]
+                        st_created = c20.read("account.bank.statement.line", [new_st_id], ["move_id", "line_ids"])[0]
+                        new_move_id = st_created["move_id"][0]
+                        c20.write("account.move", [new_move_id], {"name": original_name})
 
-        if old_move_id in st_by_move_id:
-            # ==================================================================
-            # RUTE A: MUTASI KAS & BANK VIA account.bank.statement.line
-            # ==================================================================
-            st19 = st_by_move_id[old_move_id]
-            st_vals = {
-                "journal_id": new_journal_id,
-                "date": m["date"],
-                "payment_ref": st19.get("payment_ref") or m.get("ref") or "/",
-                "amount": st19.get("amount", 0.0),
-                "partner_id": new_partner_id,
-                "line_ids": new_lines_payload,
-            }
+                        mapper.set_mapping("account.bank.statement.line", st19["id"], new_st_id, notes=original_name)
+                        mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
+                        m20_by_name[original_name] = {"id": new_move_id, "journal_id": [new_journal_id],
+                                                      "date": m["date"], "statement_line_id": [new_st_id]}
 
-            res = c20.create("account.bank.statement.line", [st_vals])
-            new_st_id = res[0]
+                        m20_lines = c20.read("account.move.line", st_created["line_ids"], m20_line_fields)
+                        line_pairs = pair_lines(old_lines, m20_lines, mapper)
+                        mapper.set_mappings_batch("account.move.line", line_pairs)
+                        success_bank += 1
+                    else:
+                        # ==========================================================
+                        # RUTE B: JURNAL UMUM / MISC VIA account.move
+                        # ==========================================================
+                        move_vals = {
+                            "name": original_name,
+                            "date": m["date"],
+                            "ref": m.get("ref") or False,
+                            "move_type": m["move_type"],
+                            "journal_id": new_journal_id,
+                            "partner_id": new_partner_id,
+                            "line_ids": new_lines_payload,
+                        }
+                        if m.get("invoice_date"):
+                            move_vals["invoice_date"] = m["invoice_date"]
+                        if m.get("invoice_date_due"):
+                            move_vals["invoice_date_due"] = m["invoice_date_due"]
 
-            # Baca kembali move_id dan line_ids yang otomatis dibuat oleh ORM Odoo
-            st_created = c20.read("account.bank.statement.line", [new_st_id], ["move_id", "line_ids"])[0]
-            new_move_id = st_created["move_id"][0]
+                        new_move_id = c20.create("account.move", [move_vals])[0]
+                        if m.get("state") == "posted":
+                            c20.call("account.move", "action_post", ids=[new_move_id])
+                            c20.write("account.move", [new_move_id], {"name": original_name})
 
-            # Pulihkan nomor urut asli (Sequence Name)
-            c20.write("account.move", [new_move_id], {"name": original_name})
+                        mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
+                        m20_by_name[original_name] = {"id": new_move_id, "journal_id": [new_journal_id],
+                                                      "date": m["date"], "statement_line_id": False}
 
-            # Simpan mapping
-            mapper.set_mapping("account.bank.statement.line", st19["id"], new_st_id, notes=original_name)
-            mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
-            m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": False}
-            m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": [new_st_id]}
-
-            # Ambil lines baru untuk pemetaan
-            m20_lines = c20.read("account.move.line", st_created["line_ids"], ["id", "account_id", "debit", "credit"])
-            line_pairs = pair_lines(old_lines, m20_lines, mapper)
-            mapper.set_mappings_batch("account.move.line", line_pairs)
-
-            success_bank += 1
-        else:
-            # ==================================================================
-            # RUTE B: JURNAL UMUM / MISC VIA account.move
-            # ==================================================================
-            move_vals = {
-                "name": original_name,
-                "date": m["date"],
-                "ref": m.get("ref") or False,
-                "move_type": m["move_type"],
-                "journal_id": new_journal_id,
-                "partner_id": new_partner_id,
-                "line_ids": new_lines_payload,
-            }
-            res = c20.create("account.move", [move_vals])
-            new_move_id = res[0]
-
-            if m.get("state") == "posted":
-                c20.call("account.move", "action_post", ids=[new_move_id])
-                c20.write("account.move", [new_move_id], {"name": original_name})
-
-            mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
-            m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": False}
-
-            m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], ["id", "account_id", "debit", "credit"])
-            line_pairs = pair_lines(old_lines, m20_lines, mapper)
-            mapper.set_mappings_batch("account.move.line", line_pairs)
-
-            success_general += 1
+                        m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], m20_line_fields, order="id asc")
+                        line_pairs = pair_lines(old_lines, m20_lines, mapper)
+                        mapper.set_mappings_batch("account.move.line", line_pairs)
+                        success_general += 1
+        except Exception as e:
+            # Isolasi error per-move: catat ke SQLite lalu LANJUT, jangan hentikan seluruh fase.
+            failed += 1
+            mapper.record_error("transactions", "account.move", old_move_id, str(e))
+            _log(f"❌ [{i}/{total_moves}] Gagal move [{old_move_id}] {original_name}: {e}", "error")
 
         if is_remote_target:
             time.sleep(0.12)
 
-        if i % 100 == 0 or i == total_moves:
+        if i % 25 == 0 or i == total_moves:
             elapsed = time.time() - t0
-            print(f"   ⚡ [{i}/{total_moves}] Diproses (Bank: {success_bank}, General: {success_general}, Lewat: {skipped}) - {elapsed:.1f}s")
+            pct = 30 + int((i / total_moves) * 45) if total_moves else 75
+            _progress(pct, f"Transaksi [{i}/{total_moves}]")
+            _log(f"   ⚡ [{i}/{total_moves}] Diproses (Bank: {success_bank}, General: {success_general}, Lewat: {skipped}, Gagal: {failed}) - {elapsed:.1f}s")
 
-    print(f"\n✅ Selesai Migrasi Transaksi: {success_bank} bank lines + {success_general} general moves berhasil 100% via API.")
+    _log(f"\n✅ Selesai Migrasi Transaksi: {success_bank} bank lines + {success_general} general moves via API "
+         f"({skipped} dilewati, {failed} gagal tercatat di SQLite).", "success" if failed == 0 else "warning")
+    return {"bank": success_bank, "general": success_general, "skipped": skipped, "failed": failed}
 
 
 # ==============================================================================
 # FASE 5: RECONCILIATION & AUDIT (PURE API)
 # ==============================================================================
-def migrate_reconciliations_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMapper):
-    print(f"\n{'='*70}\n[FASE 5] REKONSILIASI PEMBAYARAN NATIVE (PURE API)\n{'='*70}")
+def migrate_reconciliations_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMapper, log=None):
+    _log = log or (lambda text, level="info": print(text))
+    _log(f"\n{'='*70}\n[FASE 5] REKONSILIASI PEMBAYARAN NATIVE (PURE API)\n{'='*70}")
     partials_19 = c19.search_read(
         "account.partial.reconcile",
         [],
-        ["id", "debit_move_id", "credit_move_id", "amount"],
+        ["id", "debit_move_id", "credit_move_id", "amount", "full_reconcile_id"],
         order="id asc"
     )
-    print(f"📋 Ditemukan {len(partials_19)} pasangan rekonsiliasi parsial di Odoo 19.")
+    _log(f"📋 Ditemukan {len(partials_19)} pasangan rekonsiliasi parsial di Odoo 19.")
+
+    # Kelompokkan baris berdasarkan full_reconcile_id agar rekonsiliasi 3+ baris
+    # (mis. satu invoice dibayar beberapa kali) direkonsiliasi sebagai satu grup utuh.
+    from collections import defaultdict
+    groups = defaultdict(set)
+    unmapped = 0
+    for p in partials_19:
+        d_new = mapper.get_new_id("account.move.line", p["debit_move_id"][0])
+        c_new = mapper.get_new_id("account.move.line", p["credit_move_id"][0])
+        if not d_new or not c_new:
+            unmapped += 1
+            continue
+        key = p["full_reconcile_id"][0] if p.get("full_reconcile_id") else f"single_{p['id']}"
+        groups[key].add(d_new)
+        groups[key].add(c_new)
+
+    _log(f"🔄 Terbentuk {len(groups)} kelompok rekonsiliasi ({unmapped} partial dilewati karena mapping baris tidak lengkap).")
 
     success = 0
+    already = 0
     failed = 0
-    for p in partials_19:
-        d_old = p["debit_move_id"][0]
-        c_old = p["credit_move_id"][0]
-
-        d_new = mapper.get_new_id("account.move.line", d_old)
-        c_new = mapper.get_new_id("account.move.line", c_old)
-
-        if not d_new or not c_new:
-            failed += 1
-            continue
-
+    for idx, (key, line_ids) in enumerate(groups.items(), 1):
+        line_list = sorted(line_ids)
         try:
-            c20.call("account.move.line", "reconcile", ids=[d_new, c_new])
+            c20.call("account.move.line", "reconcile", ids=line_list)
             success += 1
+        except OdooAPIError as e:
+            if "already reconciled" in str(e).lower() or "already been reconciled" in str(e).lower():
+                already += 1
+            else:
+                failed += 1
+                mapper.record_error("reconcile", "account.move.line", None, f"grup {key} {line_list}: {e}")
+                _log(f"⚠️ Grup {key} gagal direkonsiliasi: {e}", "warning")
         except Exception as e:
-            # Jika sudah direkonsiliasi otomatis oleh statement line
             failed += 1
+            mapper.record_error("reconcile", "account.move.line", None, f"grup {key} {line_list}: {e}")
+            _log(f"❌ Grup {key} exception: {e}", "error")
+        if idx % 50 == 0 or idx == len(groups):
+            _log(f"   🔗 [{idx}/{len(groups)}] grup diproses (baru: {success}, sudah: {already}, gagal: {failed})")
 
-    print(f"✅ Selesai: {success} rekonsiliasi berhasil diproses native via API ({failed} dilewati/sudah terekonsiliasi).")
+    _log(f"✅ Selesai: {success} grup direkonsiliasi, {already} sudah terekonsiliasi, {failed} gagal (tercatat di SQLite).",
+         "success" if failed == 0 else "warning")
+    return {"success": success, "already": already, "failed": failed}
 
 
-def verify_pure_api(c19: OdooClient, c20: OdooClient):
-    print(f"\n{'='*70}\n[VERIFIKASI] AUDIT INTEGRITAS & TRIAL BALANCE (PURE API)\n{'='*70}")
-    ml19 = c19.search_read("account.move.line", [], ["debit", "credit"])
-    ml20 = c20.search_read("account.move.line", [], ["debit", "credit"])
+def verify_pure_api(c19: OdooClient, c20: OdooClient, log=None):
+    _log = log or (lambda text, level="info": print(text))
+    _log(f"\n{'='*70}\n[VERIFIKASI] AUDIT INTEGRITAS & TRIAL BALANCE (PURE API)\n{'='*70}")
+    # Hanya baris dari move berstatus posted, dan dibandingkan per kode akun
+    # (bukan sekadar total tenant) agar selisih antar-akun tidak saling meniadakan.
+    domain = [("parent_state", "=", "posted")]
+    fields = ["account_id", "debit", "credit"]
+    ml19 = c19.search_read("account.move.line", domain, fields)
+    ml20 = c20.search_read("account.move.line", domain, fields)
 
-    deb19 = sum(l["debit"] for l in ml19)
-    deb20 = sum(l["debit"] for l in ml20)
-    cred19 = sum(l["credit"] for l in ml19)
-    cred20 = sum(l["credit"] for l in ml20)
+    def by_code(client, lines):
+        # display_name akun berbeda antar versi (Odoo 20 tanpa kode),
+        # jadi ambil kode asli dari account.account, bukan parsing nama.
+        acc_ids = list({l["account_id"][0] for l in lines if l.get("account_id")})
+        code_map = {a["id"]: a["code"] for a in client.search_read(
+            "account.account", [("id", "in", acc_ids)], ["code"])} if acc_ids else {}
+        agg = {}
+        for l in lines:
+            if not l.get("account_id"):
+                continue
+            code = code_map.get(l["account_id"][0])
+            if not code:
+                continue
+            a = agg.setdefault(code, [0.0, 0.0])
+            a[0] += l["debit"]
+            a[1] += l["credit"]
+        return agg
 
-    print(f"Total Debit  19: Rp {deb19:,.2f} | 20: Rp {deb20:,.2f} | Diff: Rp {deb20 - deb19:,.2f}")
-    print(f"Total Credit 19: Rp {cred19:,.2f} | 20: Rp {cred20:,.2f} | Diff: Rp {cred20 - cred19:,.2f}")
+    tb19, tb20 = by_code(c19, ml19), by_code(c20, ml20)
+    deb19 = sum(v[0] for v in tb19.values()); deb20 = sum(v[0] for v in tb20.values())
+    cred19 = sum(v[1] for v in tb19.values()); cred20 = sum(v[1] for v in tb20.values())
 
-    if abs(deb20 - deb19) < 0.01 and abs(cred20 - cred19) < 0.01:
-        print("🎉 STATUS AUDIT: 100% IDENTIK & SEIMBANG (ZERO DISCREPANCY)!")
+    mismatches = []
+    for code in sorted(set(tb19) | set(tb20)):
+        d19, c19_ = tb19.get(code, [0.0, 0.0])
+        d20, c20_ = tb20.get(code, [0.0, 0.0])
+        if abs(d19 - d20) > 0.01 or abs(c19_ - c20_) > 0.01:
+            mismatches.append(code)
+
+    _log(f"Total Debit  19: Rp {deb19:,.2f} | 20: Rp {deb20:,.2f} | Diff: Rp {deb20 - deb19:,.2f}")
+    _log(f"Total Credit 19: Rp {cred19:,.2f} | 20: Rp {cred20:,.2f} | Diff: Rp {cred20 - cred19:,.2f}")
+    _log(f"Akun dengan selisih: {len(mismatches)}" + (f" -> {', '.join(mismatches[:20])}" if mismatches else ""))
+
+    balanced = abs(deb20 - deb19) < 0.01 and abs(cred20 - cred19) < 0.01 and not mismatches
+    if balanced:
+        _log("🎉 STATUS AUDIT: 100% IDENTIK & SEIMBANG (ZERO DISCREPANCY)!", "success")
     else:
-        print("⚠️ PERINGATAN: Terdapat selisih nominal!")
+        _log("⚠️ PERINGATAN: Terdapat selisih nominal atau selisih per akun!", "warning")
+    return {"balanced": balanced, "mismatches": mismatches,
+            "debit_diff": deb20 - deb19, "credit_diff": cred20 - cred19}
 
 
 # ==============================================================================

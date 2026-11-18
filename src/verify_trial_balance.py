@@ -36,16 +36,21 @@ def get_trial_balance(client: OdooClient, name: str) -> Dict[str, Dict[str, Any]
 
     tb = defaultdict(lambda: {"name": "", "debit": 0.0, "credit": 0.0, "balance": 0.0})
 
+    # display_name akun berbeda antar versi (Odoo 20 tanpa kode di depan),
+    # jadi ambil kode & nama asli dari account.account, bukan parsing nama.
+    acc_ids = list({l["account_id"][0] for l in lines if l.get("account_id")})
+    acc_map = {a["id"]: a for a in client.search_read(
+        "account.account", [("id", "in", acc_ids)], ["code", "name"])} if acc_ids else {}
+
     for l in lines:
         if not l.get("account_id"):
             continue
-        acc_id, acc_name_full = l["account_id"]
-        # Pisahkan kode akun dari nama jika formatnya '11110001 Cash'
-        parts = acc_name_full.split(" ", 1)
-        code = parts[0]
-        acc_name = parts[1] if len(parts) > 1 else acc_name_full
+        acc = acc_map.get(l["account_id"][0])
+        if not acc:
+            continue
+        code = acc["code"]
 
-        tb[code]["name"] = acc_name
+        tb[code]["name"] = acc["name"]
         tb[code]["debit"] += l["debit"]
         tb[code]["credit"] += l["credit"]
         tb[code]["balance"] += (l["debit"] - l["credit"])
