@@ -54,6 +54,9 @@ docker compose down
 Dapat dijalankan langsung dari terminal tanpa Docker:
 
 ```bash
+# Uji koneksi ke Odoo 19 & Odoo 20:
+uv run python src/test_connection.py
+
 # Jalankan seluruh fase migrasi sekaligus (All-in-One):
 uv run python src/migrate_pure_api.py --phase all
 
@@ -119,7 +122,6 @@ odoo-migration-19-to-20/
     ├── odoo_client.py                 # Klien resmi Odoo External API JSON-2
     ├── id_mapper.py                   # Modul pemetaan ID SQLite dinamis per database
     ├── migrate_pure_api.py            # Engine migrasi 100% Pure API JSON-2 (All-in-One)
-    ├── migrate_master_data.py         # Modul migrasi master data (CoA, Tax, Journal, Partner)
-    ├── migrate_transactions.py        # Modul migrasi entri jurnal transaksi
+    ├── test_connection.py             # Skrip uji koneksi & validasi kredensial (Smoke Test)
     └── verify_trial_balance.py        # Skrip audit perbandingan saldo buku besar
 ```
