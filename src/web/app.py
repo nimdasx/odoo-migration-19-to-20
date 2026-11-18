@@ -361,8 +361,8 @@ def run_migration_worker(phase: str, limit: Optional[int] = None):
     broadcaster.log(f"📁 Target Database Mapping: {os.path.basename(db_path)}")
 
     try:
-        c19 = OdooClient(cfg["source_odoo_19"]["url"], cfg["source_odoo_19"]["db"], cfg["source_odoo_19"]["api_key"])
-        c20 = OdooClient(cfg["target_odoo_20"]["url"], cfg["target_odoo_20"]["db"], cfg["target_odoo_20"]["api_key"])
+        c19 = OdooClient(cfg["source_odoo_19"]["url"], cfg["source_odoo_19"]["db"], cfg["source_odoo_19"]["api_key"], log_callback=broadcaster.log)
+        c20 = OdooClient(cfg["target_odoo_20"]["url"], cfg["target_odoo_20"]["db"], cfg["target_odoo_20"]["api_key"], log_callback=broadcaster.log)
         mapper = IdMapper.from_config(cfg)
 
         # 1. Master Data
@@ -384,6 +384,10 @@ def run_migration_worker(phase: str, limit: Optional[int] = None):
             moves_19 = c19.search_read("account.move", [], ["id", "name", "date", "ref", "state", "move_type", "journal_id", "partner_id"], order="date asc, id asc", limit=limit)
             total_moves = len(moves_19)
             broadcaster.log(f"📋 Ditemukan {total_moves} dokumen jurnal ({len(st_lines_19)} mutasi kas/bank).")
+
+            is_remote_target = "odoo.com" in c20.url or c20.url.startswith("https://") or ("localhost" not in c20.url and "127.0.0.1" not in c20.url)
+            if is_remote_target:
+                broadcaster.log("🌐 Target terdeteksi sebagai Cloud / Remote Server. Mengaktifkan adaptive pacing & auto-retry rate limit.", level="info")
 
             success_bank = 0
             success_general = 0
@@ -451,6 +455,9 @@ def run_migration_worker(phase: str, limit: Optional[int] = None):
                         line_pairs = migrate_pure_api.pair_lines(old_lines, m20_lines, mapper)
                         mapper.set_mappings_batch("account.move.line", line_pairs)
                         success_general += 1
+
+                    if is_remote_target:
+                        time.sleep(0.12)
 
                 # Update progress setiap 25 move atau saat selesai
                 if i % 25 == 0 or i == total_moves:

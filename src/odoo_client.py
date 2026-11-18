@@ -3,8 +3,9 @@ Odoo External API JSON-2 Client Helper
 Kompatibel dengan Odoo 19.0 & Odoo 20.0 (Endpoint /json/2)
 """
 import os
+import time
 import requests
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 
 class OdooAPIError(Exception):
@@ -26,7 +27,8 @@ class OdooClient:
         db: str,
         api_key: str,
         endpoint: str = "/json/2",
-        timeout: int = 60
+        timeout: int = 60,
+        log_callback: Optional[Callable[[str, str], None]] = None
     ):
         clean_url = url.rstrip("/")
         # Auto-translate localhost/127.0.0.1 saat berjalan di dalam Docker container
@@ -37,6 +39,7 @@ class OdooClient:
         self.api_key = api_key
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
+        self.log_callback = log_callback
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -46,34 +49,84 @@ class OdooClient:
             "Accept": "application/json",
         })
 
-    def call(self, model: str, method: str, ids: Optional[List[int]] = None, **kwargs) -> Any:
+    def _log(self, text: str, level: str = "info"):
+        if self.log_callback:
+            try:
+                self.log_callback(text, level)
+                return
+            except Exception:
+                pass
+        print(text)
+
+    def call(self, model: str, method: str, ids: Optional[List[int]] = None, max_retries: int = 6, **kwargs) -> Any:
         """
         Mengeksekusi request POST ke /json/2/<model>/<method>
+        Dilengkapi otomatisasi penanganan Rate Limiting (HTTP 429) & gateway timeout dengan exponential backoff.
         """
         url = f"{self.url}{self.endpoint}/{model}/{method}"
         payload = dict(kwargs)
         if ids is not None:
             payload["ids"] = ids
 
-        try:
-            response = self.session.post(url, json=payload, timeout=self.timeout)
-        except requests.RequestException as e:
-            raise OdooAPIError(f"Koneksi gagal ke {url}: {e}") from e
+        for attempt in range(max_retries):
+            try:
+                response = self.session.post(url, json=payload, timeout=self.timeout)
+            except requests.RequestException as e:
+                if attempt == max_retries - 1:
+                    raise OdooAPIError(f"Koneksi gagal ke {url}: {e}") from e
+                wait_sec = 2.0 * (attempt + 1)
+                self._log(f"⚠️ [Network Retry] Gagal terhubung ke {model}.{method} ({e}). Mencoba ulang dalam {wait_sec:.1f}s...", "warning")
+                time.sleep(wait_sec)
+                continue
 
-        try:
-            data = response.json()
-        except ValueError:
-            data = response.text
+            # 1. Penanganan HTTP 429: Too Many Requests (Rate Limiting)
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        wait_sec = float(retry_after) + 0.5
+                    except ValueError:
+                        wait_sec = 2.0 * (2 ** attempt)
+                else:
+                    wait_sec = 2.0 * (2 ** attempt)
 
-        if not response.ok:
-            error_msg = f"API Error ({response.status_code}) pada {model}.{method}"
-            if isinstance(data, dict):
-                msg = data.get("message") or data.get("name")
-                if msg:
-                    error_msg += f": {msg}"
-            raise OdooAPIError(error_msg, status_code=response.status_code, details=data)
+                wait_sec = min(wait_sec, 60.0)
+                self._log(
+                    f"⏳ [Rate Limit 429] Server Odoo Cloud ({self.url}) membatasi laju request. "
+                    f"Otomatis menunggu {wait_sec:.1f}s sebelum mencoba kembali (percobaan {attempt + 1}/{max_retries})...",
+                    "warning"
+                )
+                time.sleep(wait_sec)
+                continue
 
-        return data
+            # 2. Penanganan Transient Gateway Errors (502, 503, 504)
+            if response.status_code in (502, 503, 504):
+                wait_sec = 2.0 * (attempt + 1)
+                self._log(
+                    f"⏳ [Gateway {response.status_code}] Server Odoo sedang sibuk. "
+                    f"Menunggu {wait_sec:.1f}s sebelum retry...",
+                    "warning"
+                )
+                time.sleep(wait_sec)
+                continue
+
+            # 3. Parse Respons JSON
+            try:
+                data = response.json()
+            except ValueError:
+                data = response.text
+
+            if not response.ok:
+                error_msg = f"API Error ({response.status_code}) pada {model}.{method}"
+                if isinstance(data, dict):
+                    msg = data.get("message") or data.get("name")
+                    if msg:
+                        error_msg += f": {msg}"
+                raise OdooAPIError(error_msg, status_code=response.status_code, details=data)
+
+            return data
+
+        raise OdooAPIError(f"Rate limit / Request gagal setelah {max_retries} percobaan pada {model}.{method}", status_code=429)
 
     def search(
         self,

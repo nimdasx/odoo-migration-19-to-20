@@ -333,6 +333,10 @@ def migrate_transactions_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMa
     total_moves = len(moves_19)
     print(f"📋 Ditemukan {total_moves} dokumen jurnal yang siap dimigrasikan.")
 
+    is_remote_target = "odoo.com" in c20.url or c20.url.startswith("https://") or ("localhost" not in c20.url and "127.0.0.1" not in c20.url)
+    if is_remote_target:
+        print("🌐 Target terdeteksi sebagai Cloud / Remote Server. Mengaktifkan adaptive pacing & auto-retry rate limit.")
+
     # 3. Proses migrasi per dokumen
     success_bank = 0
     success_general = 0
@@ -420,6 +424,9 @@ def migrate_transactions_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMa
             mapper.set_mappings_batch("account.move.line", line_pairs)
 
             success_general += 1
+
+        if is_remote_target:
+            time.sleep(0.12)
 
         if i % 100 == 0 or i == total_moves:
             elapsed = time.time() - t0
