@@ -73,7 +73,7 @@ class OdooClient:
                 response = self.session.post(url, json=payload, timeout=self.timeout)
             except requests.RequestException as e:
                 if attempt == max_retries - 1:
-                    raise OdooAPIError(f"Koneksi gagal ke {url}: {e}") from e
+                    raise OdooAPIError(f"Koneksi gagal ke {url} setelah {max_retries} percobaan: {e}") from e
                 wait_sec = 2.0 * (attempt + 1)
                 self._log(f"⚠️ [Network Retry] Gagal terhubung ke {model}.{method} ({e}). Mencoba ulang dalam {wait_sec:.1f}s...", "warning")
                 time.sleep(wait_sec)
@@ -81,6 +81,11 @@ class OdooClient:
 
             # 1. Penanganan HTTP 429: Too Many Requests (Rate Limiting)
             if response.status_code == 429:
+                if attempt == max_retries - 1:
+                    raise OdooAPIError(
+                        f"Rate limit (429) tidak pulih setelah {max_retries} percobaan pada {model}.{method}",
+                        status_code=429,
+                    )
                 retry_after = response.headers.get("Retry-After")
                 if retry_after:
                     try:
@@ -92,7 +97,7 @@ class OdooClient:
 
                 wait_sec = min(wait_sec, 60.0)
                 self._log(
-                    f"⏳ [Rate Limit 429] Server Odoo Cloud ({self.url}) membatasi laju request. "
+                    f"⏳ [Rate Limit 429] Server Odoo ({self.url}) membatasi laju request. "
                     f"Otomatis menunggu {wait_sec:.1f}s sebelum mencoba kembali (percobaan {attempt + 1}/{max_retries})...",
                     "warning"
                 )
@@ -101,10 +106,15 @@ class OdooClient:
 
             # 2. Penanganan Transient Gateway Errors (502, 503, 504)
             if response.status_code in (502, 503, 504):
+                if attempt == max_retries - 1:
+                    raise OdooAPIError(
+                        f"Gateway error ({response.status_code}) tidak pulih setelah {max_retries} percobaan pada {model}.{method}",
+                        status_code=response.status_code,
+                    )
                 wait_sec = 2.0 * (attempt + 1)
                 self._log(
                     f"⏳ [Gateway {response.status_code}] Server Odoo sedang sibuk. "
-                    f"Menunggu {wait_sec:.1f}s sebelum retry...",
+                    f"Menunggu {wait_sec:.1f}s sebelum retry (percobaan {attempt + 1}/{max_retries})...",
                     "warning"
                 )
                 time.sleep(wait_sec)
@@ -126,7 +136,9 @@ class OdooClient:
 
             return data
 
-        raise OdooAPIError(f"Rate limit / Request gagal setelah {max_retries} percobaan pada {model}.{method}", status_code=429)
+        # Tidak seharusnya tercapai: semua cabang di atas return atau raise
+        # pada percobaan terakhir. Disisakan sebagai pengaman eksplisit.
+        raise OdooAPIError(f"Request gagal setelah {max_retries} percobaan pada {model}.{method}")
 
     def search(
         self,
