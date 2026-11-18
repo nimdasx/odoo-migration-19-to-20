@@ -331,6 +331,52 @@ def migrate_partners(c19: OdooClient, c20: OdooClient, mapper: IdMapper):
     print(f"✅ Selesai: {len(p19)} partner terpetakan ({matched_count} cocok eksisting, {created_count} baru dibuat).")
 
 
+def migrate_analytic_accounts(c19: OdooClient, c20: OdooClient, mapper: IdMapper):
+    print("\n--- [7/7] Sinkronisasi Akun Analitik (account.analytic.account) ---")
+    try:
+        # 1. Plans
+        plans19 = c19.search_read("account.analytic.plan", [], ["id", "name"])
+        plans20 = c20.search_read("account.analytic.plan", [], ["id", "name"])
+        p20_map = {p["name"].lower(): p["id"] for p in plans20}
+        plan_id_map = {}
+        for p in plans19:
+            p_name = p["name"]
+            matched_id = p20_map.get(p_name.lower()) or (plans20[0]["id"] if plans20 else None)
+            if not matched_id:
+                res = c20.create("account.analytic.plan", [{"name": p_name}])
+                matched_id = res[0]
+                p20_map[p_name.lower()] = matched_id
+            plan_id_map[p["id"]] = matched_id
+            mapper.set_mapping("account.analytic.plan", p["id"], matched_id, notes=p_name)
+
+        # 2. Accounts
+        accs19 = c19.search_read("account.analytic.account", [], ["id", "name", "code", "plan_id", "partner_id"])
+        accs20 = c20.search_read("account.analytic.account", [], ["id", "name", "plan_id"])
+        a20_map = {a["name"].lower(): a["id"] for a in accs20}
+
+        count = 0
+        for a in accs19:
+            old_id = a["id"]
+            name = a["name"]
+            if name.lower() in a20_map:
+                new_id = a20_map[name.lower()]
+            else:
+                old_plan = a["plan_id"][0] if a.get("plan_id") else None
+                new_plan = plan_id_map.get(old_plan) or (plans20[0]["id"] if plans20 else 1)
+                vals = {
+                    "name": name,
+                    "plan_id": new_plan,
+                    "code": a.get("code") or False,
+                }
+                new_id = c20.create("account.analytic.account", [vals])[0]
+                a20_map[name.lower()] = new_id
+            mapper.set_mapping("account.analytic.account", old_id, new_id, notes=name)
+            count += 1
+        print(f"✅ Selesai: {count} akun analitik berhasil dipetakan.")
+    except Exception as e:
+        print(f"⚠️ Gagal migrasi akun analitik: {e}")
+
+
 def main():
     print(f"{'='*60}")
     print("🚀 MEMULAI MIGRASI MASTER DATA AKUNTANSI (FASE 2)")
@@ -349,12 +395,13 @@ def main():
         migrate_accounts(c19, c20, mapper)
         migrate_journals(c19, c20, mapper)
         migrate_partners(c19, c20, mapper)
+        migrate_analytic_accounts(c19, c20, mapper)
 
         print(f"\n{'='*60}")
         print("🎉 FASE 2 SELESAI DENGAN SUKSES!")
         print(f"{'='*60}")
         print(f"Total Mapping Tercatat di SQLite:")
-        for model in ["res.company", "res.currency", "account.tax.group", "account.tax", "account.account", "account.journal", "res.partner"]:
+        for model in ["res.company", "res.currency", "account.tax.group", "account.tax", "account.account", "account.journal", "res.partner", "account.analytic.account"]:
             cnt = mapper.count(model)
             print(f"  - {model:25}: {cnt:>4} records")
         print(f"{'='*60}")

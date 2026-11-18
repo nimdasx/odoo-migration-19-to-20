@@ -389,7 +389,7 @@ def run_migration_worker(phase: str, limit: Optional[int] = None):
             success_general = 0
             skipped = 0
             t0 = time.time()
-            line_fields = ["id", "name", "account_id", "partner_id", "debit", "credit", "currency_id", "amount_currency"]
+            line_fields = ["id", "name", "account_id", "partner_id", "debit", "credit", "currency_id", "amount_currency", "analytic_distribution"]
 
             for i, m in enumerate(moves_19, 1):
                 old_move_id = m["id"]

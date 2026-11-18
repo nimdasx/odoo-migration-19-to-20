@@ -197,6 +197,42 @@ def migrate_master_data(c19: OdooClient, c20: OdooClient, mapper: IdMapper):
         mapper.set_mapping("res.partner", p["id"], new_id, notes=f"Partner: {p['name']}")
     print(f"   ✅ Selesai: {len(partners19)} kontak rekanan terpetakan.")
 
+    # 7. Analytic Accounts
+    print("   [7/7] Sinkronisasi Akun Analitik (account.analytic.account)...")
+    try:
+        plans19 = c19.search_read("account.analytic.plan", [], ["id", "name"])
+        plans20 = c20.search_read("account.analytic.plan", [], ["id", "name"])
+        p20_map = {p["name"].lower(): p["id"] for p in plans20}
+        plan_id_map = {}
+        for p in plans19:
+            p_name = p["name"]
+            matched_id = p20_map.get(p_name.lower()) or (plans20[0]["id"] if plans20 else None)
+            if not matched_id:
+                res = c20.create("account.analytic.plan", [{"name": p_name}])
+                matched_id = res[0]
+                p20_map[p_name.lower()] = matched_id
+            plan_id_map[p["id"]] = matched_id
+            mapper.set_mapping("account.analytic.plan", p["id"], matched_id, notes=p_name)
+
+        accs19 = c19.search_read("account.analytic.account", [], ["id", "name", "code", "plan_id", "partner_id"])
+        accs20 = c20.search_read("account.analytic.account", [], ["id", "name", "plan_id"])
+        a20_map = {a["name"].lower(): a["id"] for a in accs20}
+        for a in accs19:
+            old_id = a["id"]
+            name = a["name"]
+            if name.lower() in a20_map:
+                new_id = a20_map[name.lower()]
+            else:
+                old_plan = a["plan_id"][0] if a.get("plan_id") else None
+                new_plan = plan_id_map.get(old_plan) or (plans20[0]["id"] if plans20 else 1)
+                vals = {"name": name, "plan_id": new_plan, "code": a.get("code") or False}
+                new_id = c20.create("account.analytic.account", [vals])[0]
+                a20_map[name.lower()] = new_id
+            mapper.set_mapping("account.analytic.account", old_id, new_id, notes=name)
+        print(f"   ✅ Selesai: {len(accs19)} akun analitik terpetakan.")
+    except Exception as e:
+        print(f"   ⚠️ Gagal sinkronisasi akun analitik: {e}")
+
 
 # ==============================================================================
 # FASE 3: DUAL-ROUTE TRANSACTIONS (100% PURE API)
@@ -261,6 +297,17 @@ def build_lines_payload(old_lines: List[Dict[str, Any]], mapper: IdMapper) -> Li
                 line_vals["currency_id"] = curr_new
                 if "amount_currency" in l:
                     line_vals["amount_currency"] = l["amount_currency"]
+        if l.get("analytic_distribution") and isinstance(l["analytic_distribution"], dict):
+            new_dist = {}
+            for old_aa_id_str, pct in l["analytic_distribution"].items():
+                try:
+                    new_aa_id = mapper.get_new_id("account.analytic.account", int(old_aa_id_str))
+                    if new_aa_id:
+                        new_dist[str(new_aa_id)] = pct
+                except Exception:
+                    pass
+            if new_dist:
+                line_vals["analytic_distribution"] = new_dist
         new_lines.append((0, 0, line_vals))
     return new_lines
 
@@ -292,7 +339,7 @@ def migrate_transactions_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMa
     skipped = 0
     t0 = time.time()
 
-    line_fields = ["id", "name", "account_id", "partner_id", "debit", "credit", "currency_id", "amount_currency"]
+    line_fields = ["id", "name", "account_id", "partner_id", "debit", "credit", "currency_id", "amount_currency", "analytic_distribution"]
 
     for i, m in enumerate(moves_19, 1):
         old_move_id = m["id"]
