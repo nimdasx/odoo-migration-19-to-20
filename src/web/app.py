@@ -389,6 +389,10 @@ def run_migration_worker(phase: str, limit: Optional[int] = None):
             if is_remote_target:
                 broadcaster.log("🌐 Target terdeteksi sebagai Cloud / Remote Server. Mengaktifkan adaptive pacing & auto-retry rate limit.", level="info")
 
+            # Ambil indeks move eksisting di Odoo 20 untuk auto-recovery & pencegahan duplikasi (422)
+            existing_moves_20 = c20.search_read("account.move", [], ["id", "name", "statement_line_id"])
+            m20_by_name = {m["name"]: m for m in existing_moves_20 if m.get("name") and m["name"] != "/"}
+
             success_bank = 0
             success_general = 0
             skipped = 0
@@ -400,6 +404,27 @@ def run_migration_worker(phase: str, limit: Optional[int] = None):
                 original_name = m["name"]
 
                 if mapper.has_mapping("account.move", old_move_id):
+                    skipped += 1
+                elif original_name and original_name != "/" and original_name in m20_by_name:
+                    # Move sudah pernah dibuat di Odoo 20 (auto-recovery dari run sebelumnya)
+                    existing_20 = m20_by_name[original_name]
+                    new_move_id = existing_20["id"]
+                    mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
+
+                    if old_move_id in st_by_move_id:
+                        st19 = st_by_move_id[old_move_id]
+                        st20_id = existing_20["statement_line_id"][0] if existing_20.get("statement_line_id") else None
+                        if not st20_id:
+                            st20_recs = c20.search_read("account.bank.statement.line", [("move_id", "=", new_move_id)], ["id"], limit=1)
+                            if st20_recs:
+                                st20_id = st20_recs[0]["id"]
+                        if st20_id:
+                            mapper.set_mapping("account.bank.statement.line", st19["id"], st20_id, notes=original_name)
+
+                    old_lines = c19.search_read("account.move.line", [("move_id", "=", old_move_id)], line_fields, order="id asc")
+                    m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], ["id", "account_id", "debit", "credit"], order="id asc")
+                    line_pairs = migrate_pure_api.pair_lines(old_lines, m20_lines, mapper)
+                    mapper.set_mappings_batch("account.move.line", line_pairs)
                     skipped += 1
                 else:
                     new_journal_id = mapper.get_new_id("account.journal", m["journal_id"][0])
@@ -428,6 +453,8 @@ def run_migration_worker(phase: str, limit: Optional[int] = None):
 
                         mapper.set_mapping("account.bank.statement.line", st19["id"], new_st_id, notes=original_name)
                         mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
+                        m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": False}
+                        m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": [new_st_id]}
 
                         m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], ["id", "account_id", "debit", "credit"], order="id asc")
                         line_pairs = migrate_pure_api.pair_lines(old_lines, m20_lines, mapper)
@@ -451,6 +478,7 @@ def run_migration_worker(phase: str, limit: Optional[int] = None):
                             c20.write("account.move", [new_move_id], {"name": original_name})
 
                         mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
+                        m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": False}
                         m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], ["id", "account_id", "debit", "credit"], order="id asc")
                         line_pairs = migrate_pure_api.pair_lines(old_lines, m20_lines, mapper)
                         mapper.set_mappings_batch("account.move.line", line_pairs)

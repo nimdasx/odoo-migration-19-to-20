@@ -338,6 +338,9 @@ def migrate_transactions_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMa
         print("🌐 Target terdeteksi sebagai Cloud / Remote Server. Mengaktifkan adaptive pacing & auto-retry rate limit.")
 
     # 3. Proses migrasi per dokumen
+    existing_moves_20 = c20.search_read("account.move", [], ["id", "name", "statement_line_id"])
+    m20_by_name = {m["name"]: m for m in existing_moves_20 if m.get("name") and m["name"] != "/"}
+
     success_bank = 0
     success_general = 0
     skipped = 0
@@ -349,8 +352,32 @@ def migrate_transactions_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMa
         old_move_id = m["id"]
         original_name = m["name"]
 
-        # Cek jika move sudah pernah dimigrasikan
+        # Cek jika move sudah pernah dimigrasikan di SQLite
         if mapper.has_mapping("account.move", old_move_id):
+            skipped += 1
+            continue
+
+        # Cek apakah move dengan nomor sequence asli ini sudah ada di Odoo 20 (auto-recovery dari run sebelumnya)
+        if original_name and original_name != "/" and original_name in m20_by_name:
+            existing_20 = m20_by_name[original_name]
+            new_move_id = existing_20["id"]
+            mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
+            m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": False}
+
+            if old_move_id in st_by_move_id:
+                st19 = st_by_move_id[old_move_id]
+                st20_id = existing_20["statement_line_id"][0] if existing_20.get("statement_line_id") else None
+                if not st20_id:
+                    st20_recs = c20.search_read("account.bank.statement.line", [("move_id", "=", new_move_id)], ["id"], limit=1)
+                    if st20_recs:
+                        st20_id = st20_recs[0]["id"]
+                if st20_id:
+                    mapper.set_mapping("account.bank.statement.line", st19["id"], st20_id, notes=original_name)
+
+            old_lines = c19.search_read("account.move.line", [("move_id", "=", old_move_id)], line_fields, order="id asc")
+            m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], ["id", "account_id", "debit", "credit"], order="id asc")
+            line_pairs = pair_lines(old_lines, m20_lines, mapper)
+            mapper.set_mappings_batch("account.move.line", line_pairs)
             skipped += 1
             continue
 
@@ -390,6 +417,8 @@ def migrate_transactions_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMa
             # Simpan mapping
             mapper.set_mapping("account.bank.statement.line", st19["id"], new_st_id, notes=original_name)
             mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
+            m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": False}
+            m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": [new_st_id]}
 
             # Ambil lines baru untuk pemetaan
             m20_lines = c20.read("account.move.line", st_created["line_ids"], ["id", "account_id", "debit", "credit"])
@@ -418,6 +447,7 @@ def migrate_transactions_pure_api(c19: OdooClient, c20: OdooClient, mapper: IdMa
                 c20.write("account.move", [new_move_id], {"name": original_name})
 
             mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
+            m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": False}
 
             m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], ["id", "account_id", "debit", "credit"])
             line_pairs = pair_lines(old_lines, m20_lines, mapper)
