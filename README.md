@@ -121,6 +121,5 @@ odoo-migration-19-to-20/
     ├── migrate_pure_api.py            # Engine migrasi 100% Pure API JSON-2 (All-in-One)
     ├── migrate_master_data.py         # Modul migrasi master data (CoA, Tax, Journal, Partner)
     ├── migrate_transactions.py        # Modul migrasi entri jurnal transaksi
-    ├── migrate_reconciliations.py     # Modul rekonsiliasi pembayaran
     └── verify_trial_balance.py        # Skrip audit perbandingan saldo buku besar
 ```
