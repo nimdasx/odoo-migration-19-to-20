@@ -10,6 +10,8 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import secrets
 import sys
 import threading
 import time
@@ -145,7 +147,60 @@ class LoginRequest(BaseModel):
 # ==============================================================================
 # HELPER FUNCTIONS & AUTHENTICATION
 # ==============================================================================
-AUTH_SECRET = "odoo_migration_secret_salt_2026"
+# Secret acak per-proses (atau dari env bila ingin sesi stabil antar-restart).
+# Tidak lagi berupa konstanta di source yang bisa dipakai memalsukan cookie.
+AUTH_SECRET = os.environ.get("WEB_AUTH_SECRET") or secrets.token_hex(32)
+
+# Sentinel untuk menyamarkan API key saat dibaca UI; nilai ini tidak pernah
+# dianggap sebagai key asli ketika menyimpan konfigurasi.
+MASKED_KEY = "••••••••••••"
+
+# Pembatasan percobaan login sederhana (anti brute-force) per IP.
+_login_failures: Dict[str, List[float]] = {}
+_LOGIN_MAX_FAILS = 5
+_LOGIN_WINDOW_SEC = 300
+_LOGIN_LOCKOUT_SEC = 60
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _login_locked(ip: str) -> bool:
+    now = time.time()
+    hits = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_WINDOW_SEC]
+    _login_failures[ip] = hits
+    if len(hits) >= _LOGIN_MAX_FAILS:
+        return now - hits[-1] < _LOGIN_LOCKOUT_SEC
+    return False
+
+
+def _record_login_failure(ip: str) -> None:
+    _login_failures.setdefault(ip, []).append(time.time())
+
+
+def mask_config(cfg: dict) -> dict:
+    """Salinan config dengan API key disamarkan untuk ditampilkan ke browser."""
+    masked = json.loads(json.dumps(cfg))
+    for section in ("source_odoo_19", "target_odoo_20"):
+        if masked.get(section, {}).get("api_key"):
+            masked[section]["api_key"] = MASKED_KEY
+    return masked
+
+
+def resolve_api_key(url: str, db: str, provided: str) -> str:
+    """Jika key yang dikirim kosong/samaran, pakai key tersimpan yang cocok url+db."""
+    if provided and provided != MASKED_KEY:
+        return provided
+    cfg = read_current_config()
+    for section in ("source_odoo_19", "target_odoo_20"):
+        s = cfg.get(section, {})
+        if s.get("url", "").rstrip("/") == (url or "").rstrip("/") and s.get("db") == db:
+            return s.get("api_key", "")
+    return provided or ""
 
 
 def read_current_config() -> dict:
@@ -246,12 +301,20 @@ async def login_page(request: Request):
 
 
 @app.post("/api/login")
-async def api_login(payload: LoginRequest):
+async def api_login(payload: LoginRequest, request: Request):
     username, password, enabled = get_auth_credentials()
     if not enabled:
         return JSONResponse({"success": True, "message": "Autentikasi dinonaktifkan."})
 
+    ip = _client_ip(request)
+    if _login_locked(ip):
+        return JSONResponse(
+            status_code=429,
+            content={"success": False, "message": "Terlalu banyak percobaan gagal. Coba lagi dalam 60 detik."}
+        )
+
     if hmac.compare_digest(payload.username, username) and hmac.compare_digest(payload.password, password):
+        _login_failures.pop(ip, None)
         resp = JSONResponse({"success": True, "message": "Login berhasil!"})
         token = get_auth_token(username, password)
         resp.set_cookie(
@@ -260,10 +323,12 @@ async def api_login(payload: LoginRequest):
             max_age=86400 * 7,
             httponly=True,
             samesite="lax",
+            secure=(request.url.scheme == "https"),
             path="/"
         )
         return resp
     else:
+        _record_login_failure(ip)
         return JSONResponse(
             status_code=401,
             content={"success": False, "message": "Username atau password salah."}
@@ -285,7 +350,7 @@ async def index_page(request: Request):
         request=request,
         name="index.html",
         context={
-            "config": cfg,
+            "config": mask_config(cfg),
             "db_path": db_path,
             "db_filename": os.path.basename(db_path)
         }
@@ -297,7 +362,7 @@ async def get_config():
     cfg = read_current_config()
     db_path = IdMapper.get_db_path_from_config(cfg)
     return {
-        "config": cfg,
+        "config": mask_config(cfg),
         "db_path": db_path,
         "db_filename": os.path.basename(db_path)
     }
@@ -307,6 +372,12 @@ async def get_config():
 async def update_config(payload: AppConfig):
     current_cfg = read_current_config()
     cfg = payload.dict(exclude_none=True)
+    # Pertahankan API key lama bila UI mengirim nilai samaran/kosong (tidak diubah user).
+    for section in ("source_odoo_19", "target_odoo_20"):
+        incoming = cfg.get(section, {})
+        key = incoming.get("api_key", "")
+        if not key or key == MASKED_KEY:
+            incoming["api_key"] = current_cfg.get(section, {}).get("api_key", "")
     if "web_auth" in current_cfg:
         cfg["web_auth"] = current_cfg["web_auth"]
     save_current_config(cfg)
@@ -323,7 +394,8 @@ async def update_config(payload: AppConfig):
 @app.post("/api/test-connection")
 async def test_connection(payload: TestConnectionRequest):
     try:
-        client = OdooClient(payload.url, payload.db, payload.api_key, endpoint=payload.endpoint, timeout=10)
+        api_key = resolve_api_key(payload.url, payload.db, payload.api_key)
+        client = OdooClient(payload.url, payload.db, api_key, endpoint=payload.endpoint, timeout=10)
         # Query res.company
         comps = client.search_read("res.company", [], ["id", "name", "currency_id"], limit=1)
         if not comps:
@@ -373,153 +445,30 @@ def run_migration_worker(phase: str, limit: Optional[int] = None):
             broadcaster.log("✅ [Fase 2] Selesai sinkronisasi seluruh Master Data.")
             broadcaster.progress(25, "Master Data Selesai")
 
-        # 2. Transaksi
+        # 2. Transaksi — delegasikan ke engine yang sama dengan CLI (satu sumber logika).
         if phase in ("all", "transactions"):
             broadcaster.progress(30, "Fase 3: Mengambil Data Transaksi")
             broadcaster.log("📥 [Fase 3] Memulai Migrasi Transaksi Dual-Route (100% Pure API)...")
-
-            # Bungkus fungsi transaksi agar log terdistribusi ke SSE
-            st_lines_19 = c19.search_read("account.bank.statement.line", [], ["id", "move_id", "journal_id", "payment_ref", "amount", "partner_id"], order="id asc")
-            st_by_move_id = {st["move_id"][0]: st for st in st_lines_19 if st.get("move_id")}
-            moves_19 = c19.search_read("account.move", [], ["id", "name", "date", "ref", "state", "move_type", "journal_id", "partner_id"], order="date asc, id asc", limit=limit)
-            total_moves = len(moves_19)
-            broadcaster.log(f"📋 Ditemukan {total_moves} dokumen jurnal ({len(st_lines_19)} mutasi kas/bank).")
-
-            is_remote_target = "odoo.com" in c20.url or c20.url.startswith("https://") or ("localhost" not in c20.url and "127.0.0.1" not in c20.url)
-            if is_remote_target:
-                broadcaster.log("🌐 Target terdeteksi sebagai Cloud / Remote Server. Mengaktifkan adaptive pacing & auto-retry rate limit.", level="info")
-
-            # Ambil indeks move eksisting di Odoo 20 untuk auto-recovery & pencegahan duplikasi (422)
-            existing_moves_20 = c20.search_read("account.move", [], ["id", "name", "statement_line_id"])
-            m20_by_name = {m["name"]: m for m in existing_moves_20 if m.get("name") and m["name"] != "/"}
-
-            success_bank = 0
-            success_general = 0
-            skipped = 0
-            t0 = time.time()
-            line_fields = ["id", "name", "account_id", "partner_id", "debit", "credit", "currency_id", "amount_currency", "analytic_distribution"]
-
-            for i, m in enumerate(moves_19, 1):
-                old_move_id = m["id"]
-                original_name = m["name"]
-
-                if mapper.has_mapping("account.move", old_move_id):
-                    skipped += 1
-                elif original_name and original_name != "/" and original_name in m20_by_name:
-                    # Move sudah pernah dibuat di Odoo 20 (auto-recovery dari run sebelumnya)
-                    existing_20 = m20_by_name[original_name]
-                    new_move_id = existing_20["id"]
-                    mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
-
-                    if old_move_id in st_by_move_id:
-                        st19 = st_by_move_id[old_move_id]
-                        st20_id = existing_20["statement_line_id"][0] if existing_20.get("statement_line_id") else None
-                        if not st20_id:
-                            st20_recs = c20.search_read("account.bank.statement.line", [("move_id", "=", new_move_id)], ["id"], limit=1)
-                            if st20_recs:
-                                st20_id = st20_recs[0]["id"]
-                        if st20_id:
-                            mapper.set_mapping("account.bank.statement.line", st19["id"], st20_id, notes=original_name)
-
-                    old_lines = c19.search_read("account.move.line", [("move_id", "=", old_move_id)], line_fields, order="id asc")
-                    m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], ["id", "account_id", "debit", "credit"], order="id asc")
-                    line_pairs = migrate_pure_api.pair_lines(old_lines, m20_lines, mapper)
-                    mapper.set_mappings_batch("account.move.line", line_pairs)
-                    skipped += 1
-                else:
-                    new_journal_id = mapper.get_new_id("account.journal", m["journal_id"][0])
-                    new_partner_id = mapper.get_new_id("res.partner", m["partner_id"][0]) if m.get("partner_id") else False
-                    old_lines = c19.search_read("account.move.line", [("move_id", "=", old_move_id)], line_fields, order="id asc")
-                    if not old_lines:
-                        continue
-                    new_lines_payload = migrate_pure_api.build_lines_payload(old_lines, mapper)
-
-                    if old_move_id in st_by_move_id:
-                        # Rute A: Mutasi Kas/Bank
-                        st19 = st_by_move_id[old_move_id]
-                        st_vals = {
-                            "journal_id": new_journal_id,
-                            "date": m["date"],
-                            "payment_ref": st19.get("payment_ref") or m.get("ref") or "/",
-                            "amount": st19.get("amount", 0.0),
-                            "partner_id": new_partner_id,
-                            "line_ids": new_lines_payload,
-                        }
-                        res = c20.create("account.bank.statement.line", [st_vals])
-                        new_st_id = res[0]
-                        st_created = c20.read("account.bank.statement.line", [new_st_id], ["move_id", "line_ids"])[0]
-                        new_move_id = st_created["move_id"][0]
-                        c20.write("account.move", [new_move_id], {"name": original_name})
-
-                        mapper.set_mapping("account.bank.statement.line", st19["id"], new_st_id, notes=original_name)
-                        mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
-                        m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": False}
-                        m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": [new_st_id]}
-
-                        m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], ["id", "account_id", "debit", "credit"], order="id asc")
-                        line_pairs = migrate_pure_api.pair_lines(old_lines, m20_lines, mapper)
-                        mapper.set_mappings_batch("account.move.line", line_pairs)
-                        success_bank += 1
-                    else:
-                        # Rute B: Jurnal Umum
-                        move_vals = {
-                            "name": original_name,
-                            "date": m["date"],
-                            "ref": m.get("ref") or False,
-                            "move_type": m["move_type"],
-                            "journal_id": new_journal_id,
-                            "partner_id": new_partner_id,
-                            "line_ids": new_lines_payload,
-                        }
-                        res = c20.create("account.move", [move_vals])
-                        new_move_id = res[0]
-                        if m.get("state") == "posted":
-                            c20.call("account.move", "action_post", ids=[new_move_id])
-                            c20.write("account.move", [new_move_id], {"name": original_name})
-
-                        mapper.set_mapping("account.move", old_move_id, new_move_id, notes=original_name)
-                        m20_by_name[original_name] = {"id": new_move_id, "statement_line_id": False}
-                        m20_lines = c20.search_read("account.move.line", [("move_id", "=", new_move_id)], ["id", "account_id", "debit", "credit"], order="id asc")
-                        line_pairs = migrate_pure_api.pair_lines(old_lines, m20_lines, mapper)
-                        mapper.set_mappings_batch("account.move.line", line_pairs)
-                        success_general += 1
-
-                    if is_remote_target:
-                        time.sleep(0.12)
-
-                # Update progress setiap 25 move atau saat selesai
-                if i % 25 == 0 or i == total_moves:
-                    pct = 30 + int((i / total_moves) * 45) # 30% -> 75%
-                    elapsed = time.time() - t0
-                    broadcaster.progress(pct, f"Transaksi [{i}/{total_moves}]")
-                    broadcaster.log(f"   ⚡ [{i}/{total_moves}] (Bank: {success_bank}, General: {success_general}, Lewat: {skipped}) - {elapsed:.1f}s")
-
-            broadcaster.log(f"✅ Selesai: {success_bank} mutasi bank + {success_general} general moves berhasil 100% via API.")
+            result = migrate_pure_api.migrate_transactions_pure_api(
+                c19, c20, mapper, limit=limit,
+                log=broadcaster.log, progress=broadcaster.progress
+            )
+            if result.get("failed"):
+                broadcaster.log(f"⚠️ {result['failed']} move gagal dan tercatat di SQLite (tabel migration_errors).", level="warning")
             broadcaster.progress(75, "Transaksi Selesai")
 
         # 3. Rekonsiliasi
         if phase in ("all", "reconcile"):
             broadcaster.progress(80, "Fase 5: Rekonsiliasi Native")
             broadcaster.log("🔗 [Fase 5] Memproses Rekonsiliasi Pembayaran via Odoo API...")
-            migrate_pure_api.migrate_reconciliations_pure_api(c19, c20, mapper)
+            migrate_pure_api.migrate_reconciliations_pure_api(c19, c20, mapper, log=broadcaster.log)
             broadcaster.progress(90, "Rekonsiliasi Selesai")
 
         # 4. Verifikasi
         if phase in ("all", "verify"):
             broadcaster.progress(95, "Audit & Verifikasi")
             broadcaster.log("⚖️ [Verifikasi] Menghitung Trial Balance & Keseimbangan Buku Besar...")
-            ml19 = c19.search_read("account.move.line", [], ["debit", "credit"])
-            ml20 = c20.search_read("account.move.line", [], ["debit", "credit"])
-            deb19 = sum(l["debit"] for l in ml19)
-            deb20 = sum(l["debit"] for l in ml20)
-            cred19 = sum(l["credit"] for l in ml19)
-            cred20 = sum(l["credit"] for l in ml20)
-            broadcaster.log(f"   Total Debit  19: Rp {deb19:,.2f} | 20: Rp {deb20:,.2f} | Diff: Rp {deb20 - deb19:,.2f}")
-            broadcaster.log(f"   Total Credit 19: Rp {cred19:,.2f} | 20: Rp {cred20:,.2f} | Diff: Rp {cred20 - cred19:,.2f}")
-            if abs(deb20 - deb19) < 0.01 and abs(cred20 - cred19) < 0.01:
-                broadcaster.log("🎉 STATUS AUDIT: 100% IDENTIK & SEIMBANG (ZERO DISCREPANCY)!", level="success")
-            else:
-                broadcaster.log("⚠️ Terdapat selisih nominal pada Trial Balance!", level="warning")
+            migrate_pure_api.verify_pure_api(c19, c20, log=broadcaster.log)
 
         mapper.close()
         broadcaster.progress(100, "Selesai")
@@ -595,13 +544,38 @@ async def get_verification_data():
         c19 = OdooClient(cfg["source_odoo_19"]["url"], cfg["source_odoo_19"]["db"], cfg["source_odoo_19"]["api_key"], timeout=15)
         c20 = OdooClient(cfg["target_odoo_20"]["url"], cfg["target_odoo_20"]["db"], cfg["target_odoo_20"]["api_key"], timeout=15)
 
-        # 1. Move lines sum
-        ml19 = c19.search_read("account.move.line", [], ["debit", "credit"])
-        ml20 = c20.search_read("account.move.line", [], ["debit", "credit"])
-        deb19 = sum(l["debit"] for l in ml19)
-        deb20 = sum(l["debit"] for l in ml20)
-        cred19 = sum(l["credit"] for l in ml19)
-        cred20 = sum(l["credit"] for l in ml20)
+        # 1. Trial balance: hanya move 'posted', diagregasi per kode akun agar
+        #    selisih antar-akun tidak saling meniadakan (bukan sekadar total tenant).
+        domain = [("parent_state", "=", "posted")]
+        ml19 = c19.search_read("account.move.line", domain, ["account_id", "debit", "credit"])
+        ml20 = c20.search_read("account.move.line", domain, ["account_id", "debit", "credit"])
+
+        def by_code(client, lines):
+            # display_name akun berbeda antar versi (Odoo 20 tanpa kode),
+            # jadi ambil kode asli dari account.account, bukan parsing nama.
+            acc_ids = list({l["account_id"][0] for l in lines if l.get("account_id")})
+            code_map = {a["id"]: a["code"] for a in client.search_read(
+                "account.account", [("id", "in", acc_ids)], ["code"])} if acc_ids else {}
+            agg = {}
+            for l in lines:
+                if not l.get("account_id"):
+                    continue
+                code = code_map.get(l["account_id"][0])
+                if not code:
+                    continue
+                a = agg.setdefault(code, [0.0, 0.0])
+                a[0] += l["debit"]
+                a[1] += l["credit"]
+            return agg
+
+        tb19, tb20 = by_code(c19, ml19), by_code(c20, ml20)
+        deb19 = sum(v[0] for v in tb19.values()); deb20 = sum(v[0] for v in tb20.values())
+        cred19 = sum(v[1] for v in tb19.values()); cred20 = sum(v[1] for v in tb20.values())
+        account_mismatches = [
+            code for code in sorted(set(tb19) | set(tb20))
+            if abs(tb19.get(code, [0, 0])[0] - tb20.get(code, [0, 0])[0]) > 0.01
+            or abs(tb19.get(code, [0, 0])[1] - tb20.get(code, [0, 0])[1]) > 0.01
+        ]
 
         # 2. Journal Balances
         j19_data = c19.search_read("account.journal", [("type", "in", ["bank", "cash"])], ["name", "kanban_dashboard"])
@@ -611,11 +585,22 @@ async def get_verification_data():
         j20_map = {j["name"]: json.loads(j["kanban_dashboard"]).get("account_balance", "Rp 0.00") for j in j20_data}
 
         journals_summary = []
+        def _balance_number(text: str) -> float:
+            # Ambil angka dari string terformat (mis. 'Rp 1,234.56' / '$ 1,234.56')
+            # agar beda simbol mata uang tidak dianggap selisih saldo.
+            m = re.search(r"-?[\d.,]+", text or "")
+            if not m:
+                return 0.0
+            try:
+                return float(m.group(0).replace(",", ""))
+            except ValueError:
+                return 0.0
+
         for name, b19 in j19_map.items():
             b20 = j20_map.get(name) or j20_map.get(name.title()) or j20_map.get(name.upper()) or "Rp 0.00"
             b19_clean = b19.replace("\xa0", " ") if b19 else "Rp 0.00"
             b20_clean = b20.replace("\xa0", " ") if b20 else "Rp 0.00"
-            match = (b19_clean.lower() == b20_clean.lower()) or (name == "CASH" and "115,000" in b20_clean)
+            match = abs(_balance_number(b19_clean) - _balance_number(b20_clean)) < 0.01
             journals_summary.append({
                 "name": name,
                 "balance_19": b19_clean,
@@ -638,7 +623,8 @@ async def get_verification_data():
                 "credit_19": f"Rp {cred19:,.2f}",
                 "credit_20": f"Rp {cred20:,.2f}",
                 "credit_diff": f"Rp {cred20 - cred19:,.2f}",
-                "balanced": abs(deb20 - deb19) < 0.01 and abs(cred20 - cred19) < 0.01,
+                "balanced": abs(deb20 - deb19) < 0.01 and abs(cred20 - cred19) < 0.01 and not account_mismatches,
+                "account_mismatches": account_mismatches,
             },
             "counts": {
                 "moves_19": m19_count,

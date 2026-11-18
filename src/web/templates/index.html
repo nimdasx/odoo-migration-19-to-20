@@ -538,7 +538,8 @@
             badge.innerText = "✅ SEIMBANG (Zero Discrepancy)";
           } else {
             badge.className = "inline-flex items-center px-2.5 py-1 rounded-md text-xs font-semibold bg-rose-950 text-rose-400 border border-rose-800/50";
-            badge.innerText = "⚠️ TERDAPAT SELISIH";
+            const mm = (tb.account_mismatches && tb.account_mismatches.length) ? ` (${tb.account_mismatches.length} akun)` : "";
+            badge.innerText = "⚠️ TERDAPAT SELISIH" + mm;
           }
 
           if (data.journals && data.journals.length) {
